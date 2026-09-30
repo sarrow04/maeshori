@@ -90,7 +90,16 @@ if uploaded_files:
             st.warning("数値列がありません。")
 
     with tabs[4]:
-        st.write("※ 未実装 (テキスト処理拡張用)")
+        st.markdown("### 文字列（カテゴリ）のカウント")
+        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        if cat_cols:
+            selected_cat_col = st.selectbox("集計する列を選択してください", cat_cols)
+            count_df = df[selected_cat_col].value_counts().reset_index()
+            count_df.columns = [selected_cat_col, '出現回数']
+            st.write(f"（**{selected_cat_col}**）の種類: {len(count_df)}件")
+            st.dataframe(count_df, use_container_width=True)
+        else:
+            st.info("文字列（カテゴリ）の列が見つかりません。")
 
     with tabs[5]:
         numeric_df = df.select_dtypes(include=[np.number])
@@ -102,7 +111,6 @@ if uploaded_files:
     with tabs[6]:
         st.markdown("### 時間特徴量の自動抽出")
         date_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
-        
         if date_cols:
             target_date_col = st.selectbox("日付が入力されている列を選択", date_cols)
             if st.button("時間特徴量を生成"):
@@ -123,12 +131,61 @@ if uploaded_files:
             st.info("日付として処理できる列が見つかりません。")
 
     with tabs[7]:
-        st.write("※ 未実装 (欠損値補完などの拡張用)")
+        st.markdown("### データのクリーニング")
+        clean_option = st.radio("操作を選択:", ["列の削除", "欠損値の補完", "欠損行の削除"], horizontal=True)
+
+        if clean_option == "列の削除":
+            cols_to_drop = st.multiselect("削除する不要な列を選択してください", df.columns.tolist())
+            if st.button("列を削除"):
+                if cols_to_drop:
+                    st.session_state.df = df.drop(columns=cols_to_drop)
+                    st.success(f"（**{', '.join(cols_to_drop)}**）を削除しました！")
+                    st.rerun()
+                else:
+                    st.warning("列が選択されていません。")
+        
+        elif clean_option == "欠損値の補完":
+            missing_cols = df.columns[df.isnull().any()].tolist()
+            if missing_cols:
+                fill_col = st.selectbox("補完する列を選択", missing_cols)
+                fill_method = st.selectbox("補完方法", ["0で埋める", "平均値", "中央値", "最頻値", "前の値で埋める(ffill)"])
+                
+                if st.button("補完を実行"):
+                    try:
+                        df_clean = df.copy()
+                        if fill_method == "0で埋める":
+                            df_clean[fill_col] = df_clean[fill_col].fillna(0)
+                        elif fill_method == "平均値":
+                            df_clean[fill_col] = df_clean[fill_col].fillna(df_clean[fill_col].mean())
+                        elif fill_method == "中央値":
+                            df_clean[fill_col] = df_clean[fill_col].fillna(df_clean[fill_col].median())
+                        elif fill_method == "最頻値":
+                            df_clean[fill_col] = df_clean[fill_col].fillna(df_clean[fill_col].mode()[0])
+                        elif fill_method == "前の値で埋める(ffill)":
+                            df_clean[fill_col] = df_clean[fill_col].fillna(method='ffill')
+                            
+                        st.session_state.df = df_clean
+                        st.success(f"（**{fill_col}**）の欠損値を（**{fill_method}**）で補完しました！")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"補完に失敗しました。詳細: {e}")
+            else:
+                st.info("現在、欠損値のある列はありません。")
+        
+        elif clean_option == "欠損行の削除":
+            missing_rows = df.isnull().any(axis=1).sum()
+            st.write(f"現在の欠損を含む行数: （**{missing_rows:,}**）行")
+            if missing_rows > 0:
+                if st.button("欠損行をすべて削除"):
+                    st.session_state.df = df.dropna()
+                    st.success("欠損値を含む行をすべて削除しました！")
+                    st.rerun()
+            else:
+                st.info("削除する欠損行はありません。")
 
     with tabs[8]:
         st.markdown("### ワンホットエンコーディング")
         cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-        
         if cat_cols:
             target_cols = st.multiselect("エンコードする列を選択してください", cat_cols)
             if st.button("ワンホットエンコードを実行"):
