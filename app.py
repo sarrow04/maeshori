@@ -35,7 +35,7 @@ with col2:
 
 if uploaded_files:
     file_names = [f.name for f in uploaded_files]
-    selected_file_name = st.radio("ファイルを選択:", file_names, horizontal=True)
+    selected_file_name = st.radio("ベースとなるファイルを選択:", file_names, horizontal=True)
     
     # 選択ファイルが切り替わった時のみデータを読み込み直し、状態をリセットする
     if st.session_state.current_file != selected_file_name:
@@ -55,7 +55,7 @@ if uploaded_files:
 
     # 以降の処理はセッションステートに保存されたデータフレームを使用する
     df = st.session_state.df
-    st.write(f"{selected_file_name}: {df.shape[0]:,}行 × {df.shape[1]}列")
+    st.write(f"現在のデータ ({selected_file_name} ベース): {df.shape[0]:,}行 × {df.shape[1]}列")
 
     # --- 分析・処理タブ ---
     tabs = st.tabs([
@@ -201,32 +201,54 @@ if uploaded_files:
 
     with tabs[9]:
         st.markdown("### データのマージ (キー結合)")
-        if len(uploaded_files) > 1:
-            other_files = [f.name for f in uploaded_files if f.name != selected_file_name]
-            merge_target_name = st.selectbox("結合するファイルを選択", other_files)
+        
+        available_files = [f for f in uploaded_files if f.name != selected_file_name]
+        
+        if available_files:
+            st.write("現在のデータに対して、他のCSVを順番に結合していくことができます。")
+            merge_target_name = st.selectbox("結合する追加CSVファイルを選択してください", [f.name for f in available_files])
             
             if merge_target_name:
-                target_file = next(f for f in uploaded_files if f.name == merge_target_name)
+                target_file = next(f for f in available_files if f.name == merge_target_name)
                 df_target = pd.read_csv(target_file)
+                
+                st.write(f"▼ **ベースデータ (現在)**: {df.shape[0]:,}行 × {df.shape[1]}列")
+                st.write(f"▼ **追加データ ({merge_target_name})**: {df_target.shape[0]:,}行 × {df_target.shape[1]}列")
                 
                 col1_m, col2_m, col3_m = st.columns(3)
                 with col1_m:
-                    left_key = st.selectbox("現在のデータのキー列", df.columns.tolist())
+                    left_key = st.selectbox("ベースデータのキー列", df.columns.tolist())
                 with col2_m:
-                    right_key = st.selectbox("結合ファイルのキー列", df_target.columns.tolist())
+                    right_key = st.selectbox(f"{merge_target_name}のキー列", df_target.columns.tolist())
                 with col3_m:
                     how = st.selectbox("結合方法", ["left", "inner", "outer", "right"])
+                
+                left_type = df[left_key].dtype
+                right_type = df_target[right_key].dtype
+                
+                if left_type != right_type:
+                    st.warning(f"⚠️ キーのデータ型が異なります (ベース: `{left_type}`, 追加データ: `{right_type}`)。このまま結合するとエラーになる可能性が高いです。")
+                    force_str = st.checkbox("キーの型を強制的に「文字列」に統一して結合する", value=True)
+                else:
+                    force_str = st.checkbox("キーの型を強制的に「文字列」に統一して結合する", value=False)
                     
-                if st.button("マージを実行"):
+                if st.button(f"{merge_target_name} をマージ実行"):
                     try:
-                        df_merged = pd.merge(df, df_target, left_on=left_key, right_on=right_key, how=how)
+                        merge_df1 = df.copy()
+                        merge_df2 = df_target.copy()
+
+                        if force_str:
+                            merge_df1[left_key] = merge_df1[left_key].astype(str)
+                            merge_df2[right_key] = merge_df2[right_key].astype(str)
+
+                        df_merged = pd.merge(merge_df1, merge_df2, left_on=left_key, right_on=right_key, how=how)
                         st.session_state.df = df_merged
-                        st.success(f"（**{merge_target_name}**）を {how} 結合しました！ (現在 {df_merged.shape[0]:,}行 × {df_merged.shape[1]}列)")
+                        st.success(f"（**{merge_target_name}**）の結合が成功しました！")
                         st.rerun()
                     except Exception as e:
                         st.error(f"結合エラーが発生しました。詳細: {e}")
         else:
-            st.warning("結合機能を使うには、最初の画面でCSVを2つ以上ドロップしてください。")
+            st.warning("結合機能を使うには、最初の画面でCSVを2つ以上ドロップ（アップロード）してください。")
 
     with tabs[10]:
         st.write("現在のデータフレームをダウンロード")
