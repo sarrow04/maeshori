@@ -82,8 +82,7 @@ if "output_name" not in st.session_state:
 st.title("Kaggle前処理捜査ファイル")
 st.write("※メモリ不足エラーを防ぐため、100MB以上のファイルは「間引き: 10%以下」または「Parquet形式」を推奨します")
 
-st.markdown("### CSV / Parquet を選択")
-# ★ iPadでParquetがグレーアウトする問題の対策：拡張子の制限を撤廃してすべて許可する
+st.markdown("### ファイルを選択（CSV / Parquet対応）")
 uploaded_raw_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", accept_multiple_files=True)
 
 col1, col2 = st.columns(2)
@@ -93,8 +92,7 @@ with col2:
     sampling = st.selectbox("間引き", ["全行", "10%", "1%"])
 
 if uploaded_raw_files:
-    # プログラムの裏側で、選択されたファイルの中からCSVとParquetだけを抽出
-    uploaded_files = [f for f in uploaded_raw_files if f.name.lower().endswith(('.csv', '.parquet', '.pq'))]
+    uploaded_files = [f for f in uploaded_raw_files if f.name.lower().endswith(('.csv', '.parquet', '.pq', ''))]
     
     if not uploaded_files:
         st.warning("有効なCSVまたはParquetファイルを選択してください。")
@@ -105,7 +103,6 @@ if uploaded_raw_files:
         if st.session_state.current_file != selected_file_name:
             selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
             
-            # 形式を自動判別して読み込み
             temp_df = load_dataframe(selected_file, max_rows, sampling)
             optimized_df = reduce_mem_usage(temp_df)
             
@@ -113,7 +110,6 @@ if uploaded_raw_files:
             st.session_state.current_file = selected_file_name
             st.session_state.merge_success = False
             
-            # 拡張子をCSVに統一してベースファイル名を作成
             base_name = selected_file_name.rsplit('.', 1)[0]
             st.session_state.output_name = f"{base_name}.csv"
             
