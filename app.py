@@ -21,6 +21,8 @@ if "current_file" not in st.session_state:
     st.session_state.current_file = None
 if "merge_success" not in st.session_state:
     st.session_state.merge_success = False
+if "output_name" not in st.session_state:
+    st.session_state.output_name = "data.csv"
 
 st.title("Kaggle前処理捜査ファイル")
 st.write("CSVを読み込み → 基本統計・欠損・分布・相関を確認 (端末内で処理、送信なし)")
@@ -52,11 +54,12 @@ if uploaded_files:
             st.session_state.df = pd.read_csv(selected_file, nrows=max_rows)
             
         st.session_state.current_file = selected_file_name
-        st.session_state.merge_success = False # ファイル切り替え時にマージ成功フラグをリセット
+        st.session_state.merge_success = False # ファイル切り替え時にフラグをリセット
+        st.session_state.output_name = selected_file_name # 出力ファイル名もリセット
         st.rerun()
 
     df = st.session_state.df
-    st.write(f"現在のデータ ({selected_file_name} ベース): {df.shape[0]:,}行 × {df.shape[1]}列")
+    st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
 
     # --- 分析・処理タブ ---
     tabs = st.tabs([
@@ -239,20 +242,25 @@ if uploaded_files:
                             merge_df2[right_key] = merge_df2[right_key].astype(str)
 
                         df_merged = pd.merge(merge_df1, merge_df2, left_on=left_key, right_on=right_key, how=how)
+                        
+                        # 結合成功時にファイル名を自動生成 (例: train_oil.csv)
+                        base_name = st.session_state.output_name.replace('.csv', '')
+                        add_name = merge_target_name.replace('.csv', '')
+                        st.session_state.output_name = f"{base_name}_{add_name}.csv"
+                        
                         st.session_state.df = df_merged
-                        st.session_state.merge_success = True # マージ成功フラグを立てる
+                        st.session_state.merge_success = True
                         st.rerun()
                     except Exception as e:
                         st.error(f"結合エラーが発生しました。詳細: {e}")
                         
-            # マージ成功フラグが立っている場合、ここにダウンロードボタンを表示
             if st.session_state.merge_success:
                 st.success("✅ 結合が成功しました！下のボタンからすぐにダウンロードできます。")
                 csv = st.session_state.df.to_csv(index=False).encode('utf-8')
                 st.download_button(
                     label="⬇ 結合済みデータをダウンロード",
                     data=csv,
-                    file_name="merged_data.csv",
+                    file_name=st.session_state.output_name,
                     mime='text/csv',
                 )
         else:
@@ -264,7 +272,7 @@ if uploaded_files:
         st.download_button(
             label="⬇ CSV保存",
             data=csv,
-            file_name=f"processed_{selected_file_name}",
+            file_name=st.session_state.output_name,
             mime='text/csv',
         )
 else:
