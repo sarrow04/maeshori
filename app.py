@@ -52,7 +52,6 @@ def reduce_mem_usage(df):
 
 # --- CSV/Parquetの読み込みを自動判別する関数 ---
 def load_dataframe(file, max_rows, sampling):
-    # Parquetの場合
     if file.name.lower().endswith(('.parquet', '.pq')):
         df = pd.read_parquet(file)
         if sampling == "10%":
@@ -60,7 +59,6 @@ def load_dataframe(file, max_rows, sampling):
         elif sampling == "1%":
             df = df.sample(frac=0.01, random_state=42)
         return df.head(int(max_rows))
-    # CSVの場合
     else:
         actual_nrows = int(max_rows)
         if sampling == "10%":
@@ -80,7 +78,7 @@ if "output_name" not in st.session_state:
     st.session_state.output_name = "data.csv"
 
 st.title("Kaggle前処理捜査ファイル")
-st.write("※メモリ不足エラーを防ぐため、100MB以上のファイルは「間引き: 10%以下」または「Parquet形式」を推奨します")
+st.write("※メモリ不足エラーを防ぐため、大容量ファイルは「間引き: 10%以下」または「Parquet形式」を推奨します")
 
 st.markdown("### ファイルを選択（CSV / Parquet対応）")
 uploaded_raw_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", accept_multiple_files=True)
@@ -119,7 +117,12 @@ if uploaded_raw_files:
         df = st.session_state.df
         st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
 
-        tabs = st.tabs(["先頭5行", "基本統計", "欠損", "ヒストグラム", "文字列カウント", "相関係数", "時系列", "クリーニング", "エンコード", "結合", "保存(形式選択)"])
+        # タブ名を分かりやすくし、最後の保存タブを明確に配置
+        tabs = st.tabs([
+            "1.先頭5行", "2.基本統計", "3.欠損", "4.ヒストグラム", 
+            "5.文字カウント", "6.相関", "7.時系列", "8.クリーニング", 
+            "9.エンコード", "10.結合(マージ)", "💾 データの保存"
+        ])
         
         with tabs[0]:
             st.write(f"先頭5行 (全{df.shape[0]:,}行)")
@@ -257,12 +260,37 @@ if uploaded_raw_files:
                             st.error(f"結合エラーが発生しました。詳細: {e}")
                             
                 if st.session_state.merge_success:
-                    st.success("✅ 結合成功！右の「保存」タブからダウンロードできます。")
+                    st.success("✅ 結合成功！一番右の「💾 データの保存」タブからダウンロードできます。")
+                    
+                    # マージタブ内でもすぐにダウンロードできるようにボタンを配置
+                    st.markdown("---")
+                    st.markdown("#### ⬇ すぐにダウンロードする")
+                    col_dl_m1, col_dl_m2 = st.columns(2)
+                    with col_dl_m1:
+                        st.download_button(
+                            label="⬇ CSVで保存",
+                            data=df.to_csv(index=False).encode('utf-8'),
+                            file_name=st.session_state.output_name,
+                            mime='text/csv',
+                            use_container_width=True
+                        )
+                    with col_dl_m2:
+                        p_buf = io.BytesIO()
+                        df.to_parquet(p_buf, index=False)
+                        p_name = st.session_state.output_name.replace('.csv', '.parquet')
+                        st.download_button(
+                            label="⬇ Parquetで保存",
+                            data=p_buf.getvalue(),
+                            file_name=p_name,
+                            mime='application/octet-stream',
+                            use_container_width=True
+                        )
             else:
                 st.warning("結合機能を使うには、最初の画面でファイルを2つ以上アップロードしてください。")
 
+        # 11番目のタブ（💾 データの保存）
         with tabs[10]:
-            st.write("現在のデータをダウンロードします。お好きな形式を選んでください。")
+            st.write(f"現在のデータ ({st.session_state.output_name}) をダウンロードします。")
             
             col_dl1, col_dl2 = st.columns(2)
             
@@ -272,6 +300,7 @@ if uploaded_raw_files:
                     label="⬇ CSVで保存 (汎用)",
                     data=csv_data,
                     file_name=st.session_state.output_name,
+                    mime='text/css', # 修正
                     mime='text/csv',
                     use_container_width=True
                 )
@@ -288,4 +317,4 @@ if uploaded_raw_files:
                     use_container_width=True
                 )
 else:
-    st.info("上にCSVまたはParquetファイルをアップロードして開始してください。")
+    st.info("上にファイルをアップロードして開始してください。")
