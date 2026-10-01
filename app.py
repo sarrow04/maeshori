@@ -14,15 +14,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- ★データ軽量化（ダウンキャスト）関数 ---
+# --- ★データ軽量化（ダウンキャスト）関数の修正版 ---
 def reduce_mem_usage(df):
-    """数値データの型を最小化してメモリを削減するKaggle定番の処理"""
+    """数値データ（int, float）のみを対象に型を最小化してメモリを削減する"""
     start_mem = df.memory_usage().sum() / 1024**2
     for col in df.columns:
         col_type = df[col].dtype
-        if col_type != object:
+        
+        # エラー対策：データ型がintかfloatで始まるものだけを処理する
+        if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
             c_min = df[col].min()
             c_max = df[col].max()
+            
             if str(col_type)[:3] == 'int':
                 if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
                     df[col] = df[col].astype(np.int8)
@@ -39,6 +42,7 @@ def reduce_mem_usage(df):
                     df[col] = df[col].astype(np.float32)
                 else:
                     df[col] = df[col].astype(np.float64)
+                    
     end_mem = df.memory_usage().sum() / 1024**2
     return df, start_mem, end_mem
 
@@ -81,7 +85,7 @@ if uploaded_files:
         else:
             temp_df = pd.read_csv(selected_file, nrows=max_rows)
             
-        # ★ ここで軽量化処理を実行
+        # 軽量化処理を実行
         optimized_df, start_mem, end_mem = reduce_mem_usage(temp_df)
         st.toast(f"メモリ使用量を {start_mem:.2f} MB から {end_mem:.2f} MB に最適化しました！")
         
@@ -245,7 +249,7 @@ if uploaded_files:
             
             if merge_target_name:
                 target_file = next(f for f in available_files if f.name == merge_target_name)
-                # ★ 追加のファイルも読み込み時に軽量化
+                # 追加のファイルも読み込み時に軽量化
                 df_target, _, _ = reduce_mem_usage(pd.read_csv(target_file))
                 
                 col1_m, col2_m, col3_m = st.columns(3)
