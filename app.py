@@ -22,15 +22,12 @@ st.markdown("""
 
 # --- データ軽量化（ダウンキャスト）関数 ---
 def reduce_mem_usage(df):
-    """メモリを極限まで削減する処理"""
     for col in df.columns:
         col_type = df[col].dtype
         if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
             c_min, c_max = df[col].min(), df[col].max()
-            
             if pd.isna(c_min) or pd.isna(c_max): 
                 continue 
-                
             if str(col_type)[:3] == 'int':
                 if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
                     df[col] = df[col].astype(np.int8)
@@ -117,10 +114,11 @@ if uploaded_raw_files:
         df = st.session_state.df
         st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
 
+        # タブ構成を拡張（対数変換とラグ作成を追加）
         tabs = st.tabs([
             "1.先頭5行", "2.基本統計", "3.欠損", "4.ヒストグラム", 
-            "5.文字カウント", "6.相関", "7.時系列", "8.クリーニング", 
-            "9.エンコード", "10.結合(マージ)", "💾 データの保存"
+            "5.文字カウント", "6.相関", "7.時系列", "8.対数変換", "9.ラグ作成", 
+            "10.クリーニング", "11.エンコード", "12.結合", "💾 保存"
         ])
         
         with tabs[0]:
@@ -185,7 +183,63 @@ if uploaded_raw_files:
                     except Exception as e:
                         st.error(f"エラー: {e}")
 
+        # --- ★ 8. 対数変換タブ ---
         with tabs[7]:
+            st.markdown("### 特定カラムの対数変換 (Log Transform)")
+            st.write("売上や価格などの偏った数値データを対数変換（`log1p`）して正規化します。")
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            if numeric_cols:
+                log_target_cols = st.multiselect("対数変換する列を選択（複数選択可）", numeric_cols)
+                if st.button("対数変換を実行"):
+                    if log_target_cols:
+                        df_log = df.copy()
+                        for col in log_target_cols:
+                            # 0や負の値に対応するため log1p (log(1 + x)) を使用
+                            df_log[f"{col}_log1p"] = np.log1p(df_log[col].clip(lower=0))
+                        st.session_state.df = df_log
+                        st.success(f"選択した列の対数変換列（`_log1p`）を追加しました！")
+                        st.rerun()
+                    else:
+                        st.warning("列が選択されていません。")
+            else:
+                st.warning("数値列がありません。")
+
+        # --- ★ 9. ラグ特徴量作成タブ ---
+        with tabs[8]:
+            st.markdown("### 時系列ラグ特徴量の作成 (Lag Features)")
+            st.write("過去の値（例: 1日前、7日前など）を新しい列として作成します。")
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            
+            if numeric_cols:
+                lag_col = st.selectbox("ラグを作成する数値列（例: sales）", numeric_cols, key="lag_col")
+                lag_shift = st.number_input("シフト数（ラグ数。例: 1日前なら 1）", value=1, min_value=1, step=1)
+                
+                # グループ化（店舗ごと、商品ごとなど）のオプション
+                all_cols = df.columns.tolist()
+                use_group = st.checkbox("特定のIDや店舗ごとにグループ化してラグをとる（例: store_nbr単位）")
+                group_col = None
+                if use_group:
+                    group_col = st.selectbox("グループ化する列を選択", all_cols)
+                
+                if st.button("ラグ特徴量を生成"):
+                    try:
+                        df_lag = df.copy()
+                        new_col_name = f"{lag_col}_lag{lag_shift}"
+                        
+                        if use_group and group_col:
+                            df_lag[new_col_name] = df_lag.groupby(group_col)[lag_col].shift(lag_shift)
+                        else:
+                            df_lag[new_col_name] = df_lag[lag_col].shift(lag_shift)
+                            
+                        st.session_state.df = df_lag
+                        st.success(f"ラグ特徴量 `({new_col_name})` を追加しました！")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"ラグ作成エラー: {e}")
+            else:
+                st.warning("数値列がありません。")
+
+        with tabs[9]:
             st.markdown("### データのクリーニング")
             clean_option = st.radio("操作を選択:", ["列の削除", "欠損行の削除"], horizontal=True)
 
@@ -203,7 +257,7 @@ if uploaded_raw_files:
                     st.session_state.df = df.dropna()
                     st.rerun()
 
-        with tabs[8]:
+        with tabs[10]:
             st.markdown("### ワンホットエンコーディング")
             cat_cols = df.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
             if cat_cols:
@@ -213,7 +267,7 @@ if uploaded_raw_files:
                         st.session_state.df = pd.get_dummies(df, columns=target_cols, drop_first=False)
                         st.rerun()
 
-        with tabs[9]:
+        with tabs[11]:
             st.markdown("### データのマージ (キー結合)")
             available_files = [f for f in uploaded_files if f.name != selected_file_name]
             
@@ -259,7 +313,7 @@ if uploaded_raw_files:
                             st.error(f"結合エラーが発生しました。詳細: {e}")
                             
                 if st.session_state.merge_success:
-                    st.success("✅ 結合成功！一番右の「💾 データの保存」タブ、または下のボタンからダウンロードできます。")
+                    st.success("✅ 結合成功！一番右の「💾 保存」タブ、または下のボタンからダウンロードできます。")
                     
                     st.markdown("---")
                     st.markdown("#### ⬇ すぐにダウンロードする")
@@ -286,8 +340,8 @@ if uploaded_raw_files:
             else:
                 st.warning("結合機能を使うには、最初の画面でファイルを2つ以上アップロードしてください。")
 
-        # 11番目のタブ（💾 データの保存）
-        with tabs[10]:
+        # 13番目のタブ（💾 保存）
+        with tabs[12]:
             st.write(f"現在のデータ ({st.session_state.output_name}) をダウンロードします。お好きな形式を選んでください。")
             
             col_dl1, col_dl2 = st.columns(2)
