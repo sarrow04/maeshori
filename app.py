@@ -4,52 +4,8 @@ import numpy as np
 import gc
 import warnings
 
-# 警告による動作停止を防ぐ
+# 警告メッセージを画面に出さないようにする
 warnings.filterwarnings('ignore')
-
-st.set_page_config(page_title="Kaggle前処理捜査ファイル", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""
-<style>
-    .reportview-container { background-color: #1E1E2E; color: white; }
-    .sidebar .sidebar-content { background-color: #2D2D3D; }
-    div.stButton > button:first-child {
-        background-color: #3B3B52; color: #E0E0E0; border: 1px solid #555; border-radius: 5px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# 安全なメモリ削減（エラーが起きやすい列はスキップ）
-def reduce_mem_usage_safe(df):
-    for col in df.columns:
-        col_type = df[col].dtype
-        try:
-            if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
-                c_min, c_max = df[col].min(), df[col].max()
-                if pd.isna(c_min) or pd.isna(c_max): continue # 空データはスキップ
-                
-                if str(col_type)[:3] == 'int':
-                    if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                        df[col] = df[col].astype(np.int8)
-                    elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                        df[col] = df[col].astype(np.int16)
-                    elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                        df[col] = df[col].astype(np.int32)
-                else:
-                    if c_min > np.finfo(np.float16).min and c_max < np.finfo2桁（1%、もしくは行数）もデータを減らしていただいたのに、まだアプリが落ちてしまうのですね。ご不便をおかけして申し訳ありません！
-
-その原因、明確に分かりました。
-これまでのコードでは**「とりあえず指定された最大行数（100万行など）をすべてメモリに読み込んでから、その後に1%を抜き出す（捨てる）」という処理順序**になっていました。
-そのため、**1%に減らす前の「読み込んだ瞬間」に1GBのメモリ制限を突破してしまい、サーバーが強制終了していた**可能性が非常に高いです。
-
-**「最初から1%（指定行数）しか読み込ませない」**ように、データの読み込みロジックを根本から修正しました。これにより、巨大な `train.csv` をアップロードしてもメモリがパンクすることは物理的に起こらなくなります。
-
-以下のコードで `app.py` をすべて上書きしてください！
-
-```python
-import streamlit as st
-import pandas as pd
-import numpy as np
-import gc
 
 # --- ページとCSSの設定 ---
 st.set_page_config(page_title="Kaggle前処理捜査ファイル", layout="wide", initial_sidebar_state="collapsed")
@@ -63,12 +19,18 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- データ軽量化（ダウンキャスト）関数 ---
 def reduce_mem_usage(df):
     """メモリを極限まで削減する処理"""
     for col in df.columns:
         col_type = df[col].dtype
         if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
             c_min, c_max = df[col].min(), df[col].max()
+            
+            # 完全に空の列でエラーになるのを防ぐ
+            if pd.isna(c_min) or pd.isna(c_max): 
+                continue 
+                
             if str(col_type)[:3] == 'int':
                 if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
                     df[col] = df[col].astype(np.int8)
@@ -117,14 +79,14 @@ if uploaded_files:
     if st.session_state.current_file != selected_file_name:
         selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
         
-        # --- ★根本的解決：読み込む「行数自体」を最初から制限してメモリ爆発を防ぐ ---
+        # --- 根本的解決：読み込む「行数自体」を最初から制限してメモリ爆発を防ぐ ---
         actual_nrows = int(max_rows)
         if sampling == "10%":
             actual_nrows = max(1, int(max_rows * 0.1))
         elif sampling == "1%":
             actual_nrows = max(1, int(max_rows * 0.01))
             
-        # 必要な行数だけを読み込む（これにより1GBのメモリ制限に絶対に引っかからなくなります）
+        # 必要な行数だけを読み込む（これにより1GBの制限に引っかかりにくくなります）
         temp_df = pd.read_csv(selected_file, nrows=actual_nrows, low_memory=False)
             
         optimized_df = reduce_mem_usage(temp_df)
@@ -259,6 +221,7 @@ if uploaded_files:
                             df[left_key] = df[left_key].astype(str)
                             df_target[right_key] = df_target[right_key].astype(str)
 
+                        # メモリ節約のため複製せず直接結合
                         df_merged = pd.merge(df, df_target, left_on=left_key, right_on=right_key, how=how)
                         
                         base_name = st.session_state.output_name.replace('.csv', '')
@@ -268,6 +231,7 @@ if uploaded_files:
                         st.session_state.df = df_merged
                         st.session_state.merge_success = True
                         
+                        # 結合し終わった不要なデータは即座に削除してメモリ解放
                         del df_target
                         gc.collect()
                         
