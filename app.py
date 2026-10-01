@@ -19,12 +19,14 @@ if "df" not in st.session_state:
     st.session_state.df = None
 if "current_file" not in st.session_state:
     st.session_state.current_file = None
+if "merge_success" not in st.session_state:
+    st.session_state.merge_success = False
 
 st.title("Kaggle前処理捜査ファイル")
 st.write("CSVを読み込み → 基本統計・欠損・分布・相関を確認 (端末内で処理、送信なし)")
 
 # --- ファイルアップロード領域 ---
-st.markdown("### CSVを選択 / ここにドロップ")
+st.markdown("### CSVを選択 / タップしてアップロード")
 uploaded_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", type=["csv"], accept_multiple_files=True)
 
 col1, col2 = st.columns(2)
@@ -37,7 +39,6 @@ if uploaded_files:
     file_names = [f.name for f in uploaded_files]
     selected_file_name = st.radio("ベースとなるファイルを選択:", file_names, horizontal=True)
     
-    # 選択ファイルが切り替わった時のみデータを読み込み直し、状態をリセットする
     if st.session_state.current_file != selected_file_name:
         selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
         
@@ -51,9 +52,9 @@ if uploaded_files:
             st.session_state.df = pd.read_csv(selected_file, nrows=max_rows)
             
         st.session_state.current_file = selected_file_name
+        st.session_state.merge_success = False # ファイル切り替え時にマージ成功フラグをリセット
         st.rerun()
 
-    # 以降の処理はセッションステートに保存されたデータフレームを使用する
     df = st.session_state.df
     st.write(f"現在のデータ ({selected_file_name} ベース): {df.shape[0]:,}行 × {df.shape[1]}列")
 
@@ -205,15 +206,11 @@ if uploaded_files:
         available_files = [f for f in uploaded_files if f.name != selected_file_name]
         
         if available_files:
-            st.write("現在のデータに対して、他のCSVを順番に結合していくことができます。")
             merge_target_name = st.selectbox("結合する追加CSVファイルを選択してください", [f.name for f in available_files])
             
             if merge_target_name:
                 target_file = next(f for f in available_files if f.name == merge_target_name)
                 df_target = pd.read_csv(target_file)
-                
-                st.write(f"▼ **ベースデータ (現在)**: {df.shape[0]:,}行 × {df.shape[1]}列")
-                st.write(f"▼ **追加データ ({merge_target_name})**: {df_target.shape[0]:,}行 × {df_target.shape[1]}列")
                 
                 col1_m, col2_m, col3_m = st.columns(3)
                 with col1_m:
@@ -227,7 +224,7 @@ if uploaded_files:
                 right_type = df_target[right_key].dtype
                 
                 if left_type != right_type:
-                    st.warning(f"⚠️ キーのデータ型が異なります (ベース: `{left_type}`, 追加データ: `{right_type}`)。このまま結合するとエラーになる可能性が高いです。")
+                    st.warning(f"⚠️ キーのデータ型が異なります (ベース: `{left_type}`, 追加データ: `{right_type}`)")
                     force_str = st.checkbox("キーの型を強制的に「文字列」に統一して結合する", value=True)
                 else:
                     force_str = st.checkbox("キーの型を強制的に「文字列」に統一して結合する", value=False)
@@ -243,12 +240,23 @@ if uploaded_files:
 
                         df_merged = pd.merge(merge_df1, merge_df2, left_on=left_key, right_on=right_key, how=how)
                         st.session_state.df = df_merged
-                        st.success(f"（**{merge_target_name}**）の結合が成功しました！")
+                        st.session_state.merge_success = True # マージ成功フラグを立てる
                         st.rerun()
                     except Exception as e:
                         st.error(f"結合エラーが発生しました。詳細: {e}")
+                        
+            # マージ成功フラグが立っている場合、ここにダウンロードボタンを表示
+            if st.session_state.merge_success:
+                st.success("✅ 結合が成功しました！下のボタンからすぐにダウンロードできます。")
+                csv = st.session_state.df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="⬇ 結合済みデータをダウンロード",
+                    data=csv,
+                    file_name="merged_data.csv",
+                    mime='text/csv',
+                )
         else:
-            st.warning("結合機能を使うには、最初の画面でCSVを2つ以上ドロップ（アップロード）してください。")
+            st.warning("結合機能を使うには、最初の画面でCSVを2つ以上アップロードしてください。")
 
     with tabs[10]:
         st.write("現在のデータフレームをダウンロード")
@@ -260,4 +268,4 @@ if uploaded_files:
             mime='text/csv',
         )
 else:
-    st.info("上にCSVファイルをドロップして開始してください。")
+    st.info("上にCSVファイルをアップロード（または選択）して開始してください。")
