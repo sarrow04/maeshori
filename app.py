@@ -117,7 +117,6 @@ if uploaded_raw_files:
         df = st.session_state.df
         st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
 
-        # タブ名を分かりやすくし、最後の保存タブを明確に配置
         tabs = st.tabs([
             "1.先頭5行", "2.基本統計", "3.欠損", "4.ヒストグラム", 
             "5.文字カウント", "6.相関", "7.時系列", "8.クリーニング", 
@@ -260,9 +259,8 @@ if uploaded_raw_files:
                             st.error(f"結合エラーが発生しました。詳細: {e}")
                             
                 if st.session_state.merge_success:
-                    st.success("✅ 結合成功！一番右の「💾 データの保存」タブからダウンロードできます。")
+                    st.success("✅ 結合成功！一番右の「💾 データの保存」タブ、または下のボタンからダウンロードできます。")
                     
-                    # マージタブ内でもすぐにダウンロードできるようにボタンを配置
                     st.markdown("---")
                     st.markdown("#### ⬇ すぐにダウンロードする")
                     col_dl_m1, col_dl_m2 = st.columns(2)
@@ -290,7 +288,7 @@ if uploaded_raw_files:
 
         # 11番目のタブ（💾 データの保存）
         with tabs[10]:
-            st.write(f"現在のデータ ({st.session_state.output_name}) をダウンロードします。")
+            st.write(f"現在のデータ ({st.session_state.output_name}) をダウンロードします。お好きな形式を選んでください。")
             
             col_dl1, col_dl2 = st.columns(2)
             
@@ -300,7 +298,6 @@ if uploaded_raw_files:
                     label="⬇ CSVで保存 (汎用)",
                     data=csv_data,
                     file_name=st.session_state.output_name,
-                    mime='text/css', # 修正
                     mime='text/csv',
                     use_container_width=True
                 )
