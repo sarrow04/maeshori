@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import gc
 import warnings
+import io
 
 # 警告メッセージを画面に出さないようにする
 warnings.filterwarnings('ignore')
@@ -27,7 +28,6 @@ def reduce_mem_usage(df):
         if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
             c_min, c_max = df[col].min(), df[col].max()
             
-            # 完全に空の列でエラーになるのを防ぐ
             if pd.isna(c_min) or pd.isna(c_max): 
                 continue 
                 
@@ -47,8 +47,28 @@ def reduce_mem_usage(df):
                     df[col] = df[col].astype(np.float32)
                 else:
                     df[col] = df[col].astype(np.float64)
-    gc.collect() # メモリ解放
+    gc.collect() 
     return df
+
+# --- CSV/Parquetの読み込みを自動判別する関数 ---
+def load_dataframe(file, max_rows, sampling):
+    # Parquetの場合
+    if file.name.endswith(('.parquet', '.pq')):
+        df = pd.read_parquet(file)
+        if sampling == "10%":
+            df = df.sample(frac=0.1, random_state=42)
+        elif sampling == "1%":
+            df = df.sample(frac=0.01, random_state=42)
+        return df.head(int(max_rows))
+    # CSVの場合
+    else:
+        actual_nrows = int(max_rows)
+        if sampling == "10%":
+            actual_nrows = max(1, int(max_rows * 0.1))
+        elif sampling == "1%":
+            actual_nrows = max(1, int(max_rows * 0.01))
+        return pd.read_csv(file, nrows=actual_nrows, low_memory=False)
+
 
 # --- セッションステート初期化 ---
 if "df" not in st.session_state:
@@ -61,10 +81,11 @@ if "output_name" not in st.session_state:
     st.session_state.output_name = "data.csv"
 
 st.title("Kaggle前処理捜査ファイル")
-st.write("※メモリ不足エラーを防ぐため、100MB以上のファイルは「間引き: 10%以下」を推奨します")
+st.write("※メモリ不足エラーを防ぐため、100MB以上のファイルは「間引き: 10%以下」または「Parquet形式」を推奨します")
 
-st.markdown("### CSVを選択 / タップしてアップロード")
-uploaded_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", type=["csv"], accept_multiple_files=True)
+st.markdown("### CSV / Parquet を選択")
+# ★ Parquet形式もアップロードできるように拡張
+uploaded_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", type=["csv", "parquet", "pq"], accept_multiple_files=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -79,29 +100,25 @@ if uploaded_files:
     if st.session_state.current_file != selected_file_name:
         selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
         
-        # --- 根本的解決：読み込む「行数自体」を最初から制限してメモリ爆発を防ぐ ---
-        actual_nrows = int(max_rows)
-        if sampling == "10%":
-            actual_nrows = max(1, int(max_rows * 0.1))
-        elif sampling == "1%":
-            actual_nrows = max(1, int(max_rows * 0.01))
-            
-        # 必要な行数だけを読み込む（これにより1GBの制限に引っかかりにくくなります）
-        temp_df = pd.read_csv(selected_file, nrows=actual_nrows, low_memory=False)
-            
+        # 形式を自動判別して読み込み
+        temp_df = load_dataframe(selected_file, max_rows, sampling)
         optimized_df = reduce_mem_usage(temp_df)
         
         st.session_state.df = optimized_df
         st.session_state.current_file = selected_file_name
         st.session_state.merge_success = False
-        st.session_state.output_name = selected_file_name
+        
+        # 拡張子をCSVに統一してベースファイル名を作成
+        base_name = selected_file_name.rsplit('.', 1)[0]
+        st.session_state.output_name = f"{base_name}.csv"
+        
         gc.collect()
         st.rerun()
 
     df = st.session_state.df
     st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
 
-    tabs = st.tabs(["先頭5行", "基本統計", "欠損", "ヒストグラム", "文字列カウント", "相関係数", "時系列", "クリーニング", "エンコード", "結合", "CSV保存"])
+    tabs = st.tabs(["先頭5行", "基本統計", "欠損", "ヒストグラム", "文字列カウント", "相関係数", "時系列", "クリーニング", "エンコード", "結合", "保存(保存形式選択)"])
     
     with tabs[0]:
         st.write(f"先頭5行 (全{df.shape[0]:,}行)")
@@ -198,12 +215,14 @@ if uploaded_files:
         available_files = [f for f in uploaded_files if f.name != selected_file_name]
         
         if available_files:
-            merge_target_name = st.selectbox("結合する追加CSVファイルを選択", [f.name for f in available_files])
+            merge_target_name = st.selectbox("結合する追加ファイルを選択", [f.name for f in available_files])
             
             if merge_target_name:
                 target_file = next(f for f in available_files if f.name == merge_target_name)
-                # 結合先のデータも行数を絞る（メモリ爆発防止）
-                df_target = reduce_mem_usage(pd.read_csv(target_file, nrows=max_rows, low_memory=False))
+                
+                # 自動判別関数を使って結合先データを読み込み
+                df_target_raw = load_dataframe(target_file, max_rows, sampling="全行")
+                df_target = reduce_mem_usage(df_target_raw)
                 
                 col1_m, col2_m, col3_m = st.columns(3)
                 with col1_m:
@@ -221,17 +240,15 @@ if uploaded_files:
                             df[left_key] = df[left_key].astype(str)
                             df_target[right_key] = df_target[right_key].astype(str)
 
-                        # メモリ節約のため複製せず直接結合
                         df_merged = pd.merge(df, df_target, left_on=left_key, right_on=right_key, how=how)
                         
                         base_name = st.session_state.output_name.replace('.csv', '')
-                        add_name = merge_target_name.replace('.csv', '')
+                        add_name = merge_target_name.rsplit('.', 1)[0]
                         st.session_state.output_name = f"{base_name}_{add_name}.csv"
                         
                         st.session_state.df = df_merged
                         st.session_state.merge_success = True
                         
-                        # 結合し終わった不要なデータは即座に削除してメモリ解放
                         del df_target
                         gc.collect()
                         
@@ -240,20 +257,37 @@ if uploaded_files:
                         st.error(f"結合エラーが発生しました。詳細: {e}")
                         
             if st.session_state.merge_success:
-                st.success("✅ 結合成功！")
-                st.download_button(
-                    label="⬇ 結合済みデータをダウンロード",
-                    data=st.session_state.df.to_csv(index=False).encode('utf-8'),
-                    file_name=st.session_state.output_name,
-                    mime='text/csv',
-                )
+                st.success("✅ 結合成功！右の「保存」タブからダウンロードできます。")
+        else:
+            st.warning("結合機能を使うには、最初の画面でファイルを2つ以上アップロードしてください。")
 
     with tabs[10]:
-        st.download_button(
-            label="⬇ CSV保存",
-            data=df.to_csv(index=False).encode('utf-8'),
-            file_name=st.session_state.output_name,
-            mime='text/csv',
-        )
+        st.write("現在のデータをダウンロードします。お好きな形式を選んでください。")
+        
+        col_dl1, col_dl2 = st.columns(2)
+        
+        # 1. CSVでダウンロード
+        with col_dl1:
+            csv_data = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇ CSVで保存 (汎用)",
+                data=csv_data,
+                file_name=st.session_state.output_name,
+                mime='text/csv',
+                use_container_width=True
+            )
+            
+        # 2. Parquetでダウンロード
+        with col_dl2:
+            parquet_buffer = io.BytesIO()
+            df.to_parquet(parquet_buffer, index=False)
+            parquet_name = st.session_state.output_name.replace('.csv', '.parquet')
+            st.download_button(
+                label="⬇ Parquetで保存 (軽量・高速)",
+                data=parquet_buffer.getvalue(),
+                file_name=parquet_name,
+                mime='application/octet-stream',
+                use_container_width=True
+            )
 else:
-    st.info("上にCSVファイルをアップロードして開始してください。")
+    st.info("上にCSVまたはParquetファイルをアップロードして開始してください。")
