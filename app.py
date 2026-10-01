@@ -14,6 +14,34 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- ★データ軽量化（ダウンキャスト）関数 ---
+def reduce_mem_usage(df):
+    """数値データの型を最小化してメモリを削減するKaggle定番の処理"""
+    start_mem = df.memory_usage().sum() / 1024**2
+    for col in df.columns:
+        col_type = df[col].dtype
+        if col_type != object:
+            c_min = df[col].min()
+            c_max = df[col].max()
+            if str(col_type)[:3] == 'int':
+                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                    df[col] = df[col].astype(np.int8)
+                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                    df[col] = df[col].astype(np.int16)
+                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                    df[col] = df[col].astype(np.int32)
+                elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
+                    df[col] = df[col].astype(np.int64)  
+            else:
+                if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
+                    df[col] = df[col].astype(np.float16)
+                elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                    df[col] = df[col].astype(np.float32)
+                else:
+                    df[col] = df[col].astype(np.float64)
+    end_mem = df.memory_usage().sum() / 1024**2
+    return df, start_mem, end_mem
+
 # --- セッションステートの初期化 ---
 if "df" not in st.session_state:
     st.session_state.df = None
@@ -46,16 +74,21 @@ if uploaded_files:
         
         if sampling == "10%":
             temp_df = pd.read_csv(selected_file, nrows=max_rows)
-            st.session_state.df = temp_df.sample(frac=0.1, random_state=42)
+            temp_df = temp_df.sample(frac=0.1, random_state=42)
         elif sampling == "1%":
             temp_df = pd.read_csv(selected_file, nrows=max_rows)
-            st.session_state.df = temp_df.sample(frac=0.01, random_state=42)
+            temp_df = temp_df.sample(frac=0.01, random_state=42)
         else:
-            st.session_state.df = pd.read_csv(selected_file, nrows=max_rows)
+            temp_df = pd.read_csv(selected_file, nrows=max_rows)
             
+        # ★ ここで軽量化処理を実行
+        optimized_df, start_mem, end_mem = reduce_mem_usage(temp_df)
+        st.toast(f"メモリ使用量を {start_mem:.2f} MB から {end_mem:.2f} MB に最適化しました！")
+        
+        st.session_state.df = optimized_df
         st.session_state.current_file = selected_file_name
-        st.session_state.merge_success = False # ファイル切り替え時にフラグをリセット
-        st.session_state.output_name = selected_file_name # 出力ファイル名もリセット
+        st.session_state.merge_success = False
+        st.session_state.output_name = selected_file_name
         st.rerun()
 
     df = st.session_state.df
@@ -205,7 +238,6 @@ if uploaded_files:
 
     with tabs[9]:
         st.markdown("### データのマージ (キー結合)")
-        
         available_files = [f for f in uploaded_files if f.name != selected_file_name]
         
         if available_files:
@@ -213,7 +245,8 @@ if uploaded_files:
             
             if merge_target_name:
                 target_file = next(f for f in available_files if f.name == merge_target_name)
-                df_target = pd.read_csv(target_file)
+                # ★ 追加のファイルも読み込み時に軽量化
+                df_target, _, _ = reduce_mem_usage(pd.read_csv(target_file))
                 
                 col1_m, col2_m, col3_m = st.columns(3)
                 with col1_m:
@@ -243,7 +276,6 @@ if uploaded_files:
 
                         df_merged = pd.merge(merge_df1, merge_df2, left_on=left_key, right_on=right_key, how=how)
                         
-                        # 結合成功時にファイル名を自動生成 (例: train_oil.csv)
                         base_name = st.session_state.output_name.replace('.csv', '')
                         add_name = merge_target_name.replace('.csv', '')
                         st.session_state.output_name = f"{base_name}_{add_name}.csv"
