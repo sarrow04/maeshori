@@ -14,14 +14,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- ★データ軽量化（ダウンキャスト）関数の修正版 ---
+# --- ★データ軽量化（ダウンキャスト）関数 ---
 def reduce_mem_usage(df):
     """数値データ（int, float）のみを対象に型を最小化してメモリを削減する"""
     start_mem = df.memory_usage().sum() / 1024**2
     for col in df.columns:
         col_type = df[col].dtype
         
-        # エラー対策：データ型がintかfloatで始まるものだけを処理する
         if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
             c_min = df[col].min()
             c_max = df[col].max()
@@ -76,16 +75,16 @@ if uploaded_files:
     if st.session_state.current_file != selected_file_name:
         selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
         
+        # ★エラー対策：low_memory=False を追加して大容量データの型混在警告を回避
         if sampling == "10%":
-            temp_df = pd.read_csv(selected_file, nrows=max_rows)
+            temp_df = pd.read_csv(selected_file, nrows=max_rows, low_memory=False)
             temp_df = temp_df.sample(frac=0.1, random_state=42)
         elif sampling == "1%":
-            temp_df = pd.read_csv(selected_file, nrows=max_rows)
+            temp_df = pd.read_csv(selected_file, nrows=max_rows, low_memory=False)
             temp_df = temp_df.sample(frac=0.01, random_state=42)
         else:
-            temp_df = pd.read_csv(selected_file, nrows=max_rows)
+            temp_df = pd.read_csv(selected_file, nrows=max_rows, low_memory=False)
             
-        # 軽量化処理を実行
         optimized_df, start_mem, end_mem = reduce_mem_usage(temp_df)
         st.toast(f"メモリ使用量を {start_mem:.2f} MB から {end_mem:.2f} MB に最適化しました！")
         
@@ -106,11 +105,12 @@ if uploaded_files:
     
     with tabs[0]:
         st.write(f"先頭5行 (全{df.shape[0]:,}行)")
-        st.dataframe(df.head(), use_container_width=True)
+        st.dataframe(df.head(), width='stretch')
         
     with tabs[1]:
         st.write("基本統計量")
-        st.dataframe(df.describe(include='all').T, use_container_width=True)
+        # ★エラー対策：PyArrowのクラッシュを防ぐため、強制的に文字列型（.astype(str)）に統一して表示
+        st.dataframe(df.describe(include='all').T.astype(str), width='stretch')
         
     with tabs[2]:
         st.write("列ごとの欠損値数")
@@ -120,7 +120,7 @@ if uploaded_files:
         if missing.empty:
             st.success("欠損値はありません。")
         else:
-            st.dataframe(missing, use_container_width=True)
+            st.dataframe(missing, width='stretch')
             
     with tabs[3]:
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -132,26 +132,27 @@ if uploaded_files:
 
     with tabs[4]:
         st.markdown("### 文字列（カテゴリ）のカウント")
-        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        # ★警告対策：Pandasの仕様変更に合わせて 'string' も追加
+        cat_cols = df.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
         if cat_cols:
             selected_cat_col = st.selectbox("集計する列を選択してください", cat_cols)
             count_df = df[selected_cat_col].value_counts().reset_index()
             count_df.columns = [selected_cat_col, '出現回数']
             st.write(f"（**{selected_cat_col}**）の種類: {len(count_df)}件")
-            st.dataframe(count_df, use_container_width=True)
+            st.dataframe(count_df, width='stretch')
         else:
             st.info("文字列（カテゴリ）の列が見つかりません。")
 
     with tabs[5]:
         numeric_df = df.select_dtypes(include=[np.number])
         if not numeric_df.empty:
-            st.dataframe(numeric_df.corr().style.background_gradient(cmap='coolwarm'), use_container_width=True)
+            st.dataframe(numeric_df.corr().style.background_gradient(cmap='coolwarm'), width='stretch')
         else:
             st.warning("数値列がありません。")
 
     with tabs[6]:
         st.markdown("### 時間特徴量の自動抽出")
-        date_cols = df.select_dtypes(include=['object', 'datetime']).columns.tolist()
+        date_cols = df.select_dtypes(include=['object', 'datetime', 'string']).columns.tolist()
         if date_cols:
             target_date_col = st.selectbox("日付が入力されている列を選択", date_cols)
             if st.button("時間特徴量を生成"):
@@ -226,7 +227,7 @@ if uploaded_files:
 
     with tabs[8]:
         st.markdown("### ワンホットエンコーディング")
-        cat_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        cat_cols = df.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
         if cat_cols:
             target_cols = st.multiselect("エンコードする列を選択してください", cat_cols)
             if st.button("ワンホットエンコードを実行"):
@@ -249,8 +250,8 @@ if uploaded_files:
             
             if merge_target_name:
                 target_file = next(f for f in available_files if f.name == merge_target_name)
-                # 追加のファイルも読み込み時に軽量化
-                df_target, _, _ = reduce_mem_usage(pd.read_csv(target_file))
+                # low_memory=False を追加
+                df_target, _, _ = reduce_mem_usage(pd.read_csv(target_file, low_memory=False))
                 
                 col1_m, col2_m, col3_m = st.columns(3)
                 with col1_m:
