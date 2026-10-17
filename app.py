@@ -14,19 +14,43 @@ TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "Sal
 
 @st.cache_data
 def read_file_safely(file_bytes, file_name):
-    if file_name.endswith('.parquet'):
-        return pd.read_parquet(file_bytes)
-    elif file_name.endswith('.csv.gz'):
-        return pd.read_csv(file_bytes, compression='gzip', low_memory=False)
+    fname_lower = file_name.lower()
+    
+    # 1. Parquetと推測される場合
+    if fname_lower.endswith('.parquet'):
+        try:
+            return pd.read_parquet(file_bytes)
+        except Exception as e:
+            st.error(f"Parquet形式としての読み込みに失敗しました: {e}")
+            st.stop()
+            
+    # 2. GZIP圧縮CSVと推測される場合
+    elif fname_lower.endswith('.csv.gz') or fname_lower.endswith('.gz'):
+        try:
+            return pd.read_csv(file_bytes, compression='gzip', low_memory=False)
+        except Exception as e:
+            st.error(f"GZIP圧縮CSVの読み込みに失敗しました: {e}")
+            st.stop()
+            
+    # 3. CSV形式、またはiPhone等で拡張子が不明になっている場合の汎用処理
     else:
         errors = []
+        # まずはCSVとして様々な文字コードで試す
         for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
             try:
                 file_bytes.seek(0)
                 return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
             except Exception as e:
-                errors.append(f"{enc}: {e}")
-        st.error("ファイルを読み込めませんでした。\n" + "\n".join(errors))
+                errors.append(f"CSV({enc}): {e}")
+                
+        # CSVとして全滅した場合、ダメ元でParquet形式として読んでみる（iOSの拡張子消失対策）
+        try:
+            file_bytes.seek(0)
+            return pd.read_parquet(file_bytes)
+        except Exception:
+            pass
+            
+        st.error("ファイルを読み込めませんでした。文字コードやファイル形式が対応していない可能性があります。\n" + "\n".join(errors))
         st.stop()
 
 def clean_text_value(value):
@@ -110,7 +134,8 @@ with col_ctrl:
         read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 結合（コンペ用）"], horizontal=True)
         
         if read_mode == "単一ファイル":
-            uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)", type=["csv", "gz", "parquet"])
+            # type制限を外してiPhoneでも全ファイルを選択可能にする
+            uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)")
             if uploaded_file is not None:
                 df = read_file_safely(uploaded_file, uploaded_file.name)
                 df["_source_"] = "single"
@@ -118,8 +143,8 @@ with col_ctrl:
                 st.session_state.original_size = uploaded_file.size
         else:
             c1, c2 = st.columns(2)
-            with c1: train_file = st.file_uploader("Train", type=["csv", "gz", "parquet"])
-            with c2: test_file = st.file_uploader("Test", type=["csv", "gz", "parquet"])
+            with c1: train_file = st.file_uploader("Train")
+            with c2: test_file = st.file_uploader("Test")
                 
             if train_file is not None and test_file is not None:
                 train_df = read_file_safely(train_file, train_file.name)
@@ -170,203 +195,3 @@ with col_ctrl:
                 ])
             c3, c4, c5 = st.columns(3)
             with c3:
-                fe_prefix = st.text_input("接頭辞（任意）")
-            with c4:
-                fe_keyword = st.text_input("キーワード（フラグ用）")
-            with c5:
-                fe_delimiter = st.text_input("区切り文字（ダミー用）", value="/", key="fe_delim")
-
-        with st.expander("🗑 フィルタ・列削除"):
-            c1, c2, c3 = st.columns(3)
-            with c1: range_column = st.selectbox("数値フィルタ列", ["(なし)"] + df_cols)
-            with c2: min_value = st.text_input("最小値")
-            with c3: max_value = st.text_input("最大値")
-            drop_columns_text = st.text_input("削除する列名（カンマ区切り）")
-
-        st.write("")
-        if st.button("🚀 前処理を実行する", type="primary", use_container_width=True):
-            with st.spinner("処理中..."):
-                df = st.session_state.df.copy()
-                log = []
-                target = target_col if target_col != "(なし)" else None
-
-                if clean_text:
-                    text_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns if c != "_source_"]
-                    for col in text_cols:
-                        df[col] = df[col].map(clean_text_value)
-                    log.append(f"文字列整理：{len(text_cols)}列の空白・改行を整理")
-
-                if missing_action == "数値列を中央値で補完":
-                    for col in get_numeric_columns(df):
-                        if col != target and df[col].isna().any():
-                            train_median = df[df["_source_"] == "train"][col].median() if "train" in df["_source_"].values else df[col].median()
-                            df[col] = df[col].fillna(train_median)
-                    log.append("欠損値補完：数値列を補完（Trainの中央値を使用）")
-                elif missing_action == "欠損行を削除":
-                    df = df.dropna().copy()
-                    log.append("欠損行削除：欠損を含む行を削除")
-
-                if duplicate:
-                    df = df.drop_duplicates().copy()
-                    log.append("重複行削除：完全一致する行を削除")
-
-                if outlier_action == "IQRで異常値行を削除":
-                    for col in get_numeric_columns(df):
-                        if col == target: continue
-                        s = pd.to_numeric(df[col], errors="coerce").dropna()
-                        if len(s) < 4: continue
-                        q1, q3 = s.quantile([0.25, 0.75])
-                        iqr = q3 - q1
-                        low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                        df = df[~((df[col] < low) | (df[col] > high))].copy()
-                    log.append("異常値削除：IQR基準で行を削除")
-
-                if range_column != "(なし)":
-                    numeric = pd.to_numeric(df[range_column], errors="coerce")
-                    mask = pd.Series(True, index=df.index)
-                    if min_value.strip(): mask &= numeric >= float(min_value)
-                    if max_value.strip(): mask &= numeric <= float(max_value)
-                    df = df.loc[mask].copy()
-                    log.append(f"範囲フィルタ：{range_column} をフィルタ")
-
-                if drop_columns_text.strip():
-                    to_drop = [x.strip() for x in drop_columns_text.split(",") if x.strip() in df.columns and x.strip() not in [target, "_source_"]]
-                    if to_drop:
-                        df = df.drop(columns=to_drop)
-                        log.append(f"列削除：{', '.join(to_drop)} を削除")
-
-                if replace_column != "(なし)" and remove_text.strip():
-                    df[replace_column] = df[replace_column].astype(str).str.replace(remove_text, "", regex=False)
-                    log.append(f"文字列削除：{replace_column} から '{remove_text}' を除去")
-
-                if split_column != "(なし)" and split_delimiter:
-                    prefix = split_prefix.strip() or f"{split_column}_分割"
-                    n_parts = int(split_max_parts)
-                    split_values = df[split_column].astype(str).str.split(re.escape(split_delimiter), n=n_parts - 1, expand=True)
-                    for i in range(split_values.shape[1]):
-                        df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip()
-                    log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割")
-
-                if fe_column != "(なし)" and fe_method != "何もしない":
-                    source = df[fe_column]
-                    prefix = fe_prefix.strip() or f"{fe_column}"
-                    
-                    if fe_method == "文字数カウント":
-                        df[f"{prefix}_文字数"] = source.astype(str).str.len()
-                        log.append(f"特徴量追加：{fe_column} の文字数")
-                    elif fe_method == "最初の数値を抽出":
-                        extracted = source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
-                        df[f"{prefix}_数値"] = pd.to_numeric(extracted, errors="coerce")
-                        log.append(f"特徴量追加：{fe_column} から数値抽出")
-                    elif fe_method == "「徒歩〇分」から最短分数を抽出":
-                        def get_min_walk(text):
-                            if pd.isna(text): return np.nan
-                            matches = re.findall(r"徒歩\s*(\d+)\s*分?", str(text))
-                            if matches: return min(map(int, matches))
-                            return np.nan
-                        df[f"{prefix}_最短徒歩分"] = source.apply(get_min_walk)
-                        log.append(f"特徴量追加：{fe_column} から徒歩最短分数")
-                    elif fe_method == "「築〇年」から年数を抽出 (新築=0)":
-                        def get_building_age(text):
-                            if pd.isna(text): return np.nan
-                            s = str(text)
-                            if "新築" in s: return 0.0
-                            y_match = re.search(r"(\d+)\s*年", s)
-                            m_match = re.search(r"(\d+)\s*ヶ月", s)
-                            y = int(y_match.group(1)) if y_match else 0
-                            m = int(m_match.group(1)) if m_match else 0
-                            if not y_match and not m_match: return np.nan
-                            return y + (m / 12.0)
-                        df[f"{prefix}_築年数"] = source.apply(get_building_age)
-                        log.append(f"特徴量追加：{fe_column} から築年数抽出")
-                    elif fe_method == "キーワード有無フラグ":
-                        if fe_keyword.strip():
-                            df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
-                            log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
-                    elif fe_method == "ダミー変数化 (One-Hot)":
-                        dummies = pd.get_dummies(source, prefix=prefix, dummy_na=False).astype(int)
-                        df = pd.concat([df, dummies], axis=1)
-                        log.append(f"特徴量追加：{fe_column} をダミー化")
-                    elif fe_method == "マルチラベルダミー化 (区切り文字)":
-                        delim = fe_delimiter if fe_delimiter else "/"
-                        dummies = source.astype(str).str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True).str.get_dummies(sep=delim)
-                        if prefix:
-                            dummies.columns = [f"{prefix}_{c}" for c in dummies.columns]
-                        df = pd.concat([df, dummies], axis=1)
-                        log.append(f"特徴量追加：{fe_column} をマルチラベルダミー化")
-                    elif fe_method == "数値のビン分割 (10分割)":
-                        num_series = pd.to_numeric(source, errors="coerce")
-                        df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
-                        log.append(f"特徴量追加：{fe_column} をビン分割")
-
-                st.session_state.processed_df = df
-                st.session_state.logs = log
-
-with col_view:
-    st.header("📊 データビュー")
-    
-    if st.session_state.df is None:
-        st.info("👈 左側のメニューからファイルをアップロードしてください。")
-    else:
-        view_tabs = st.tabs(["処理前データ", "プロファイル・分布", "処理後データ・ダウンロード"])
-        
-        with view_tabs[0]:
-            display_raw = st.session_state.df.drop(columns=["_source_"], errors="ignore")
-            st.markdown(f"**読込データ: {display_raw.shape[0]}行 × {display_raw.shape[1]}列**")
-            st.dataframe(display_raw, height=600, use_container_width=True)
-
-        with view_tabs[1]:
-            st.markdown("**全カラムの基本情報**")
-            st.dataframe(profile_table(st.session_state.df), use_container_width=True)
-            st.divider()
-            st.markdown("**ヒストグラム**")
-            num_cols = get_numeric_columns(st.session_state.df)
-            if num_cols:
-                hist_col = st.selectbox("分布を確認する列", num_cols)
-                fig = make_histogram(st.session_state.df, hist_col)
-                if fig:
-                    st.pyplot(fig)
-            else:
-                st.info("数値列がありません。")
-
-        with view_tabs[2]:
-            if st.session_state.processed_df is not None:
-                display_proc = st.session_state.processed_df.drop(columns=["_source_"], errors="ignore")
-                st.success("処理が完了しました！")
-                with st.expander("📝 処理ログを確認", expanded=False):
-                    for log in st.session_state.logs:
-                        st.write(f"- {log}")
-                
-                st.markdown(f"**加工後データ: {display_proc.shape[0]}行 × {display_proc.shape[1]}列**")
-                st.dataframe(display_proc.head(100), height=300, use_container_width=True)
-                
-                st.markdown("### 📥 ダウンロード")
-                save_format = st.radio("「**保存形式を選択**」", ["通常のCSV (.csv)", "GZIP圧縮CSV (.csv.gz)", "Parquet形式 (.parquet)"])
-                
-                source_vals = st.session_state.processed_df.get("_source_", pd.Series()).unique()
-                
-                if "train" in source_vals and "test" in source_vals:
-                    train_out = st.session_state.processed_df[st.session_state.processed_df["_source_"] == "train"].drop(columns=["_source_"])
-                    test_out = st.session_state.processed_df[st.session_state.processed_df["_source_"] == "test"].drop(columns=["_source_"])
-                    
-                    train_data, ext, mime = convert_df(train_out, save_format)
-                    test_data, _, _ = convert_df(test_out, save_format)
-                    
-                    total_new_size = len(train_data) + len(test_data)
-                    reduction = (1 - total_new_size / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
-                    
-                    st.write(f"処理後サイズ合計: {total_new_size / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
-                    
-                    dl_c1, dl_c2 = st.columns(2)
-                    with dl_c1:
-                        st.download_button("Trainデータをダウンロード", train_data, f"preprocessed_train.{ext}", mime, type="primary")
-                    with dl_c2:
-                        st.download_button("Testデータをダウンロード", test_data, f"preprocessed_test.{ext}", mime, type="primary")
-                else:
-                    out_data, ext, mime = convert_df(display_proc, save_format)
-                    reduction = (1 - len(out_data) / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
-                    
-                    st.write(f"処理後サイズ: {len(out_data) / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
-                    st.download_button("「**ダウンロード**」", out_data, f"preprocessed_data.{ext}", mime, type="primary")
-            else:
-                st.info("左側のメニューで「🚀 前処理を実行する」ボタンを押すと、ここに結果が表示されます。")
