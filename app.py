@@ -203,12 +203,14 @@ with col_ctrl:
             missing_action = st.radio("欠損値処理", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
             outlier_action = st.radio("異常値処理", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
 
-        with st.expander("✂️ セル内の文字消去・カラム分割"):
+        with st.expander("✂️ 文字の消去・抽出・カラム分割"):
             c1, c2 = st.columns(2)
             with c1:
-                replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + df_cols)
+                replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + df_cols, key="replace_col")
+                extract_column = st.selectbox("特定の文字だけ残す(抽出)列", ["(なし)"] + df_cols, key="extract_col")
             with c2:
-                remove_text = st.text_input("消したい文字 (カンマ区切りで複数可)")
+                remove_text = st.text_input("消したい文字 (カンマ区切り可)")
+                extract_text = st.text_input("残したい文字 (カンマ区切り可)")
             st.divider()
             c3, c4 = st.columns(2)
             with c3:
@@ -310,13 +312,32 @@ with col_ctrl:
                         df[replace_column] = df[replace_column].astype(str).str.replace(word, "", regex=False)
                     log.append(f"セル内文字消去：{replace_column} から '{', '.join(remove_words)}' を消去")
 
+                if extract_column != "(なし)" and extract_text.strip():
+                    extract_words = [w.strip() for w in extract_text.split(",") if w.strip()]
+                    pattern = '|'.join([re.escape(w) for w in extract_words])
+                    
+                    def extract_match(text):
+                        if pd.isna(text): return np.nan
+                        matches = re.findall(pattern, str(text))
+                        if matches:
+                            seen = set()
+                            res = []
+                            for m in matches:
+                                if m not in seen:
+                                    seen.add(m)
+                                    res.append(m)
+                            return ",".join(res)
+                        return np.nan
+                    
+                    df[extract_column] = df[extract_column].apply(extract_match)
+                    log.append(f"文字抽出：{extract_column} に '{', '.join(extract_words)}' のみを残す")
+
                 if split_column != "(なし)" and split_delimiter:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
                     n_parts = int(split_max_parts)
                     temp_series = df[split_column].fillna("").astype(str)
                     
                     if split_delimiter == "空白":
-                        # 半角・全角スペースやタブなどで自動的に分割
                         split_values = temp_series.str.split(n=n_parts - 1, expand=True)
                     else:
                         if split_delimiter == "/":
@@ -375,7 +396,6 @@ with col_ctrl:
                         temp_series = source.fillna("").astype(str)
                         
                         if delim == "空白":
-                            # 半角・全角・タブなどの連続する空白を1つの文字(|)に置き換えてダミー化する
                             temp_series = temp_series.str.strip().str.replace(r'\s+', '|', regex=True)
                             actual_delim = '|'
                         else:
