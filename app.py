@@ -111,6 +111,7 @@ def convert_df(df, format_type):
 # -----------------------------
 st.title("🚀 拡張版 データ前処理・特徴量生成アプリ")
 
+# セッション管理の初期化
 if "df" not in st.session_state:
     st.session_state.df = None
 if "processed_df" not in st.session_state:
@@ -119,12 +120,25 @@ if "logs" not in st.session_state:
     st.session_state.logs = []
 if "original_size" not in st.session_state:
     st.session_state.original_size = 0
+if "current_file_id" not in st.session_state:
+    st.session_state.current_file_id = None
 
 col_ctrl, col_view = st.columns([4, 6], gap="large")
 
 with col_ctrl:
-    st.header("⚙️ 設定と実行")
     
+    # ------------------
+    # 1. データ読み込み
+    # ------------------
+    c_head1, c_head2 = st.columns([6, 4])
+    with c_head1:
+        st.header("⚙️ 設定と実行")
+    with c_head2:
+        if st.session_state.df is not None:
+            if st.button("🔄 最初からやり直す", help="元のアップロードデータにリセットします", use_container_width=True):
+                st.session_state.current_file_id = None
+                st.rerun()
+
     with st.container(border=True):
         st.subheader("1. データ読み込み")
         read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 結合（コンペ用）"], horizontal=True)
@@ -132,10 +146,22 @@ with col_ctrl:
         if read_mode == "単一ファイル":
             uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)")
             if uploaded_file is not None:
-                df = read_file_safely(uploaded_file, uploaded_file.name)
-                df["_source_"] = "single"
-                st.session_state.df = df
-                st.session_state.original_size = uploaded_file.size
+                fid = f"single_{uploaded_file.name}_{uploaded_file.size}"
+                # 新しいファイルがアップロードされた時のみ読み込む（勝手なリセットを防止）
+                if st.session_state.current_file_id != fid:
+                    df = read_file_safely(uploaded_file, uploaded_file.name)
+                    df["_source_"] = "single"
+                    st.session_state.df = df
+                    st.session_state.original_size = uploaded_file.size
+                    st.session_state.current_file_id = fid
+                    st.session_state.processed_df = None
+                    st.session_state.logs = []
+            else:
+                if st.session_state.current_file_id is not None:
+                    st.session_state.current_file_id = None
+                    st.session_state.df = None
+                    st.session_state.processed_df = None
+                    st.rerun()
         else:
             c1, c2 = st.columns(2)
             with c1: 
@@ -144,13 +170,27 @@ with col_ctrl:
                 test_file = st.file_uploader("Test")
                 
             if train_file is not None and test_file is not None:
-                train_df = read_file_safely(train_file, train_file.name)
-                test_df = read_file_safely(test_file, test_file.name)
-                train_df["_source_"] = "train"
-                test_df["_source_"] = "test"
-                st.session_state.df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
-                st.session_state.original_size = train_file.size + test_file.size
+                fid = f"multi_{train_file.name}_{train_file.size}_{test_file.name}_{test_file.size}"
+                if st.session_state.current_file_id != fid:
+                    train_df = read_file_safely(train_file, train_file.name)
+                    test_df = read_file_safely(test_file, test_file.name)
+                    train_df["_source_"] = "train"
+                    test_df["_source_"] = "test"
+                    st.session_state.df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+                    st.session_state.original_size = train_file.size + test_file.size
+                    st.session_state.current_file_id = fid
+                    st.session_state.processed_df = None
+                    st.session_state.logs = []
+            else:
+                if st.session_state.current_file_id is not None:
+                    st.session_state.current_file_id = None
+                    st.session_state.df = None
+                    st.session_state.processed_df = None
+                    st.rerun()
 
+    # ------------------
+    # 2. 前処理の設定
+    # ------------------
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
         default_target = next((c for c in TARGET_CANDIDATES if c in df_cols), df_cols[0])
@@ -228,7 +268,6 @@ with col_ctrl:
                             df[col] = df[col].fillna(train_median)
                     log.append("欠損値補完：数値列を補完（Trainの中央値を使用）")
                 elif missing_action == "欠損行を削除":
-                    # バグ修正：安全のため、目的変数が空欄の行のみ消すか、全カラムが空欄の行だけ消すように変更
                     if target:
                         before_len = len(df)
                         df = df.dropna(subset=[target]).copy()
@@ -275,15 +314,11 @@ with col_ctrl:
                 if split_column != "(なし)" and split_delimiter:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
                     n_parts = int(split_max_parts)
-                    
-                    # バグ修正：半角/全角スラッシュのすれ違いを吸収
                     temp_series = df[split_column].fillna("").astype(str)
                     if split_delimiter == "/":
                         temp_series = temp_series.str.replace("／", "/")
                         
                     split_values = temp_series.str.split(split_delimiter, n=n_parts - 1, expand=True)
-                    
-                    # バグ修正：分割数が足りなくても必ず n_parts 列分作成する
                     for i in range(n_parts):
                         if i < split_values.shape[1]:
                             df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip().replace("", np.nan)
@@ -333,8 +368,6 @@ with col_ctrl:
                         log.append(f"特徴量追加：{fe_column} をダミー化")
                     elif fe_method == "マルチラベルダミー化 (区切り文字)":
                         delim = fe_delimiter if fe_delimiter else "/"
-                        
-                        # バグ修正：空欄(NaN)を文字列の"nan"としてダミー化しないように処理
                         temp_series = source.fillna("").astype(str)
                         if delim == "/":
                             temp_series = temp_series.str.replace("／", "/")
