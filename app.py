@@ -14,11 +14,9 @@ TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "Sal
 
 @st.cache_data
 def read_csv_safely(file_bytes):
-    """複数エンコーディングを試してCSVを読み込む"""
     errors = []
     for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
         try:
-            # バイトデータを先頭に戻して読み込む
             file_bytes.seek(0)
             return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
         except Exception as e:
@@ -76,7 +74,6 @@ def make_histogram(df, column):
 st.title("🚀 拡張版 CSV前処理・特徴量生成アプリ")
 st.markdown("Streamlit版: CSVを確認し、条件を選んで前処理します。元データは上書きしません。")
 
-# セッションステートの初期化
 if "df" not in st.session_state:
     st.session_state.df = None
 if "processed_df" not in st.session_state:
@@ -103,8 +100,6 @@ with tab1:
                 fig = make_histogram(st.session_state.df, hist_col)
                 if fig:
                     st.pyplot(fig)
-        else:
-            st.info("数値列がありません。")
 
 with tab2:
     if st.session_state.df is not None:
@@ -120,11 +115,10 @@ with tab2:
             outlier_action = st.radio("異常値処理", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
 
         with st.expander("✂️ カラム分割・文字列置換"):
-            st.markdown("任意の文字（ / や , など）を指定してカラムを複数に分割できます。")
             col1, col2 = st.columns(2)
             with col1:
                 split_column = st.selectbox("分割する列", ["(なし)"] + df_cols)
-                split_delimiter = st.text_input("区切り文字 (例: / )", value="/")
+                split_delimiter = st.text_input("区切り文字 (例: / )", value="/", key="split_delim")
             with col2:
                 split_prefix = st.text_input("新しい列名の接頭辞")
                 split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
@@ -136,20 +130,26 @@ with tab2:
             with col4:
                 remove_text = st.text_input("削除したい文字列 (例: 円, 東京都)")
 
-        with st.expander("✨ 特徴量エンジニアリング"):
+        with st.expander("✨ 特徴量エンジニアリング", expanded=True):
             col1, col2 = st.columns(2)
             with col1:
                 fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
             with col2:
                 fe_method = st.selectbox("処理方法", [
-                    "何もしない", "文字数カウント", "数値抽出", 
-                    "キーワード有無フラグ", "ダミー変数化 (One-Hot)", "数値のビン分割 (10分割)"
+                    "何もしない", "文字数カウント", "最初の数値を抽出", 
+                    "「徒歩〇分」から最短分数を抽出",  # 追加
+                    "「築〇年」から年数を抽出 (新築=0)", # 追加
+                    "キーワード有無フラグ", "ダミー変数化 (One-Hot)", 
+                    "マルチラベルダミー化 (区切り文字)", 
+                    "数値のビン分割 (10分割)"
                 ])
-            col3, col4 = st.columns(2)
+            col3, col4, col5 = st.columns(3)
             with col3:
-                fe_prefix = st.text_input("特徴量の新しい列名の接頭辞")
+                fe_prefix = st.text_input("新しい列名の接頭辞（任意）")
             with col4:
-                fe_keyword = st.text_input("キーワード（有無フラグ用）")
+                fe_keyword = st.text_input("キーワード（フラグ用）")
+            with col5:
+                fe_delimiter = st.text_input("区切り文字（ダミー用）", value="/", key="fe_delim")
 
         with st.expander("🗑 フィルタ・列削除"):
             col1, col2, col3 = st.columns(3)
@@ -161,7 +161,6 @@ with tab2:
                 max_value = st.text_input("最大値")
             drop_columns_text = st.text_input("削除する列名（カンマ区切り）")
 
-        # 前処理実行ボタン
         if st.button("前処理を実行", type="primary"):
             with st.spinner("処理中..."):
                 df = st.session_state.df.copy()
@@ -179,10 +178,10 @@ with tab2:
                     for col in get_numeric_columns(df):
                         if col != target and df[col].isna().any():
                             df[col] = df[col].fillna(df[col].median())
-                    log.append("欠損値補完：数値列を中央値で補完（目的変数は除く）")
+                    log.append("欠損値補完：数値列を中央値で補完")
                 elif missing_action == "欠損行を削除":
                     df = df.dropna().copy()
-                    log.append("欠損行削除：欠損を含む行をすべて削除")
+                    log.append("欠損行削除：欠損を含む行を削除")
 
                 if duplicate:
                     df = df.drop_duplicates().copy()
@@ -197,7 +196,7 @@ with tab2:
                         iqr = q3 - q1
                         low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
                         df = df[~((df[col] < low) | (df[col] > high))].copy()
-                    log.append("異常値削除：IQR基準で外れ値を含む行を削除")
+                    log.append("異常値削除：IQR基準で行を削除")
 
                 # 2. フィルタ・列削除
                 if range_column != "(なし)":
@@ -206,7 +205,7 @@ with tab2:
                     if min_value.strip(): mask &= numeric >= float(min_value)
                     if max_value.strip(): mask &= numeric <= float(max_value)
                     df = df.loc[mask].copy()
-                    log.append(f"範囲フィルタ：{range_column} の指定範囲外を削除")
+                    log.append(f"範囲フィルタ：{range_column} をフィルタ")
 
                 if drop_columns_text.strip():
                     to_drop = [x.strip() for x in drop_columns_text.split(",") if x.strip() in df.columns and x.strip() != target]
@@ -225,36 +224,67 @@ with tab2:
                     split_values = df[split_column].astype(str).str.split(re.escape(split_delimiter), n=n_parts - 1, expand=True)
                     for i in range(split_values.shape[1]):
                         df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip()
-                    log.append(f"カラム分割：{split_column} を '{split_delimiter}' で最大 {n_parts} 分割")
+                    log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割")
 
                 # 4. 特徴量エンジニアリング
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
-                    prefix = fe_prefix.strip() or f"{fe_column}_特徴"
+                    prefix = fe_prefix.strip() or f"{fe_column}"
                     
                     if fe_method == "文字数カウント":
                         df[f"{prefix}_文字数"] = source.astype(str).str.len()
-                        log.append(f"特徴量追加：{fe_column} の文字数をカウント")
+                        log.append(f"特徴量追加：{fe_column} の文字数")
                         
-                    elif fe_method == "数値抽出":
+                    elif fe_method == "最初の数値を抽出":
                         extracted = source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
                         df[f"{prefix}_数値"] = pd.to_numeric(extracted, errors="coerce")
-                        log.append(f"特徴量追加：{fe_column} から数値を抽出")
+                        log.append(f"特徴量追加：{fe_column} から数値抽出")
+                        
+                    elif fe_method == "「徒歩〇分」から最短分数を抽出":
+                        def get_min_walk(text):
+                            if pd.isna(text): return np.nan
+                            matches = re.findall(r"徒歩\s*(\d+)\s*分?", str(text))
+                            if matches: return min(map(int, matches))
+                            return np.nan
+                        df[f"{prefix}_最短徒歩分"] = source.apply(get_min_walk)
+                        log.append(f"特徴量追加：{fe_column} から徒歩の最短分数を抽出")
+
+                    elif fe_method == "「築〇年」から年数を抽出 (新築=0)":
+                        def get_building_age(text):
+                            if pd.isna(text): return np.nan
+                            s = str(text)
+                            if "新築" in s: return 0.0
+                            y_match = re.search(r"(\d+)\s*年", s)
+                            m_match = re.search(r"(\d+)\s*ヶ月", s)
+                            y = int(y_match.group(1)) if y_match else 0
+                            m = int(m_match.group(1)) if m_match else 0
+                            if not y_match and not m_match: return np.nan
+                            return y + (m / 12.0)
+                        df[f"{prefix}_築年数"] = source.apply(get_building_age)
+                        log.append(f"特徴量追加：{fe_column} から築年数を抽出")
                         
                     elif fe_method == "キーワード有無フラグ":
                         if fe_keyword.strip():
                             df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
-                            log.append(f"特徴量追加：{fe_column} に '{fe_keyword}' が含まれるかフラグ化")
+                            log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
                             
                     elif fe_method == "ダミー変数化 (One-Hot)":
                         dummies = pd.get_dummies(source, prefix=prefix, dummy_na=False).astype(int)
                         df = pd.concat([df, dummies], axis=1)
-                        log.append(f"特徴量追加：{fe_column} をダミー変数化")
+                        log.append(f"特徴量追加：{fe_column} をダミー化")
+
+                    elif fe_method == "マルチラベルダミー化 (区切り文字)":
+                        delim = fe_delimiter if fe_delimiter else "/"
+                        dummies = source.astype(str).str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True).str.get_dummies(sep=delim)
+                        if prefix:
+                            dummies.columns = [f"{prefix}_{c}" for c in dummies.columns]
+                        df = pd.concat([df, dummies], axis=1)
+                        log.append(f"特徴量追加：{fe_column} をマルチラベルダミー化")
                         
                     elif fe_method == "数値のビン分割 (10分割)":
                         num_series = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
-                        log.append(f"特徴量追加：{fe_column} を10段階のビンに分割")
+                        log.append(f"特徴量追加：{fe_column} をビン分割")
 
                 st.session_state.processed_df = df
                 st.session_state.logs = log
@@ -271,7 +301,6 @@ with tab3:
         st.subheader(f"加工後データ (全 {st.session_state.processed_df.shape[0]}行 × {st.session_state.processed_df.shape[1]}列)")
         st.dataframe(st.session_state.processed_df.head(100), use_container_width=True)
         
-        # CSVダウンロード用データの作成
         csv = st.session_state.processed_df.to_csv(index=False, encoding="utf-8-sig")
         st.download_button(
             label="📥 加工済みCSVをダウンロード",
@@ -282,3 +311,10 @@ with tab3:
         )
     else:
         st.info("前処理が完了すると、ここに結果とダウンロードボタンが表示されます。")
+```<FollowUp>
+  <ElicitationsGroup>
+    <Elicitation>「所在階」や「間取り」など、他にも自動で抽出させたい項目はありますか？</Elicitation>
+    <Elicitation>複数駅がある場合、最短だけでなく「一番目の駅の名前」だけを切り出す機能も追加しましょうか？</Elicitation>
+    <Elicitation>抽出された徒歩分数のデータを使って、LightGBMでの学習精度に影響が出そうか確認できそうですか？</Elicitation>
+  </ElicitationsGroup>
+</FollowUp>
