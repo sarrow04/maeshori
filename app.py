@@ -147,7 +147,6 @@ with col_ctrl:
             uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)")
             if uploaded_file is not None:
                 fid = f"single_{uploaded_file.name}_{uploaded_file.size}"
-                # 新しいファイルがアップロードされた時のみ読み込む（勝手なリセットを防止）
                 if st.session_state.current_file_id != fid:
                     df = read_file_safely(uploaded_file, uploaded_file.name)
                     df["_source_"] = "single"
@@ -214,7 +213,7 @@ with col_ctrl:
             c3, c4 = st.columns(2)
             with c3:
                 split_column = st.selectbox("分割する列", ["(なし)"] + df_cols)
-                split_delimiter = st.text_input("区切り文字 (例: / )", value="/", key="split_delim")
+                split_delimiter = st.text_input("区切り文字 (スペースで分ける場合は「空白」と入力)", value="/", key="split_delim")
             with c4:
                 split_prefix = st.text_input("新しい列名の接頭辞")
                 split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
@@ -236,7 +235,7 @@ with col_ctrl:
             with c4:
                 fe_keyword = st.text_input("キーワード（フラグ用）")
             with c5:
-                fe_delimiter = st.text_input("区切り文字（ダミー用）", value="/", key="fe_delim")
+                fe_delimiter = st.text_input("区切り文字 (スペースで分ける場合は「空白」と入力)", value="/", key="fe_delim")
 
         with st.expander("🗑 列まるごと削除・数値フィルタ"):
             drop_columns = st.multiselect("🗑 列（カラム）をまるごと削除", df_cols, help="クリックして消したい列を複数選べます")
@@ -315,16 +314,21 @@ with col_ctrl:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
                     n_parts = int(split_max_parts)
                     temp_series = df[split_column].fillna("").astype(str)
-                    if split_delimiter == "/":
-                        temp_series = temp_series.str.replace("／", "/")
+                    
+                    if split_delimiter == "空白":
+                        # 半角・全角スペースやタブなどで自動的に分割
+                        split_values = temp_series.str.split(n=n_parts - 1, expand=True)
+                    else:
+                        if split_delimiter == "/":
+                            temp_series = temp_series.str.replace("／", "/")
+                        split_values = temp_series.str.split(split_delimiter, n=n_parts - 1, expand=True)
                         
-                    split_values = temp_series.str.split(split_delimiter, n=n_parts - 1, expand=True)
                     for i in range(n_parts):
                         if i < split_values.shape[1]:
                             df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip().replace("", np.nan)
                         else:
                             df[f"{prefix}_{i+1}"] = np.nan
-                    log.append(f"カラム分割：{split_column} を {n_parts} 分割展開")
+                    log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割展開")
 
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
@@ -369,11 +373,18 @@ with col_ctrl:
                     elif fe_method == "マルチラベルダミー化 (区切り文字)":
                         delim = fe_delimiter if fe_delimiter else "/"
                         temp_series = source.fillna("").astype(str)
-                        if delim == "/":
-                            temp_series = temp_series.str.replace("／", "/")
+                        
+                        if delim == "空白":
+                            # 半角・全角・タブなどの連続する空白を1つの文字(|)に置き換えてダミー化する
+                            temp_series = temp_series.str.strip().str.replace(r'\s+', '|', regex=True)
+                            actual_delim = '|'
+                        else:
+                            if delim == "/":
+                                temp_series = temp_series.str.replace("／", "/")
+                            temp_series = temp_series.str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True)
+                            actual_delim = delim
                             
-                        temp_series = temp_series.str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True)
-                        dummies = temp_series.str.get_dummies(sep=delim)
+                        dummies = temp_series.str.get_dummies(sep=actual_delim)
                         
                         if "" in dummies.columns:
                             dummies = dummies.drop(columns=[""])
