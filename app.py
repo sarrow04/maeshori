@@ -311,10 +311,4 @@ with tab3:
         )
     else:
         st.info("前処理が完了すると、ここに結果とダウンロードボタンが表示されます。")
-```<FollowUp>
-  <ElicitationsGroup>
-    <Elicitation>「所在階」や「間取り」など、他にも自動で抽出させたい項目はありますか？</Elicitation>
-    <Elicitation>複数駅がある場合、最短だけでなく「一番目の駅の名前」だけを切り出す機能も追加しましょうか？</Elicitation>
-    <Elicitation>抽出された徒歩分数のデータを使って、LightGBMでの学習精度に影響が出そうか確認できそうですか？</Elicitation>
-  </ElicitationsGroup>
-</FollowUp>
+
