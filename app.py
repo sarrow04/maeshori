@@ -261,9 +261,12 @@ with col_ctrl:
                 if split_column != "(なし)" and split_delimiter:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
                     n_parts = int(split_max_parts)
-                    split_values = df[split_column].astype(str).str.split(re.escape(split_delimiter), n=n_parts - 1, expand=True)
+                    # 修正：エスケープを外し、NaNを空文字にしてから分割
+                    split_values = df[split_column].fillna("").astype(str).str.split(split_delimiter, n=n_parts - 1, expand=True)
                     for i in range(split_values.shape[1]):
                         df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip()
+                        # 空文字になった場合はNaNに戻す（後続処理のため）
+                        df[f"{prefix}_{i+1}"] = df[f"{prefix}_{i+1}"].replace("", np.nan)
                     log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割")
 
                 if fe_column != "(なし)" and fe_method != "何もしない":
@@ -318,7 +321,6 @@ with col_ctrl:
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
                         log.append(f"特徴量追加：{fe_column} をビン分割")
 
-                # ここで列削除を実行（特徴量作成より後にすることで、作成に使った元の列を消せる）
                 if drop_columns:
                     to_drop = [c for c in drop_columns if c in df.columns and c not in [target, "_source_"]]
                     if to_drop:
