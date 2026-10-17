@@ -1,371 +1,284 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import gc
-import warnings
+import matplotlib.pyplot as plt
+import re
 import io
 
-# 警告メッセージを画面に出さないようにする
-warnings.filterwarnings('ignore')
+st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 
-# --- ページとCSSの設定 ---
-st.set_page_config(page_title="Kaggle前処理捜査ファイル", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""
-<style>
-    .reportview-container { background-color: #1E1E2E; color: white; }
-    .sidebar .sidebar-content { background-color: #2D2D3D; }
-    div.stButton > button:first-child {
-        background-color: #3B3B52; color: #E0E0E0; border: 1px solid #555; border-radius: 5px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# -----------------------------
+# 共通処理
+# -----------------------------
+TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice"]
 
-# --- データ軽量化（ダウンキャスト）関数 ---
-def reduce_mem_usage(df):
+@st.cache_data
+def read_csv_safely(file_bytes):
+    """複数エンコーディングを試してCSVを読み込む"""
+    errors = []
+    for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
+        try:
+            # バイトデータを先頭に戻して読み込む
+            file_bytes.seek(0)
+            return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
+        except Exception as e:
+            errors.append(f"{enc}: {e}")
+    st.error("CSVを読み込めませんでした。\n" + "\n".join(errors))
+    st.stop()
+
+def clean_text_value(value):
+    if pd.isna(value):
+        return value
+    s = str(value)
+    s = s.replace("\u3000", " ").replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def get_numeric_columns(df):
+    return df.select_dtypes(include=[np.number]).columns.tolist()
+
+def profile_table(df):
+    rows = []
     for col in df.columns:
-        col_type = df[col].dtype
-        if str(col_type)[:3] == 'int' or str(col_type)[:5] == 'float':
-            c_min, c_max = df[col].min(), df[col].max()
-            if pd.isna(c_min) or pd.isna(c_max): 
-                continue 
-            if str(col_type)[:3] == 'int':
-                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                    df[col] = df[col].astype(np.int8)
-                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                    df[col] = df[col].astype(np.int16)
-                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                    df[col] = df[col].astype(np.int32)
-                elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
-                    df[col] = df[col].astype(np.int64)  
-            else:
-                if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
-                    df[col] = df[col].astype(np.float16)
-                elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
-                    df[col] = df[col].astype(np.float32)
-                else:
-                    df[col] = df[col].astype(np.float64)
-    gc.collect() 
-    return df
+        s = df[col]
+        row = {
+            "カラム": str(col),
+            "データ型": str(s.dtype),
+            "欠損数": int(s.isna().sum()),
+            "欠損率(%)": round(float(s.isna().mean() * 100), 2) if len(s) else 0,
+            "ユニーク数": int(s.nunique(dropna=True)),
+            "サンプル値": " | ".join(s.dropna().astype(str).head(3).tolist())
+        }
+        if pd.api.types.is_numeric_dtype(s):
+            row.update({"平均": s.mean(), "最小値": s.min(), "最大値": s.max()})
+        else:
+            row.update({"平均": np.nan, "最小値": np.nan, "最大値": np.nan})
+        rows.append(row)
+    return pd.DataFrame(rows)
 
-# --- CSV/Parquetの読み込みを自動判別する関数 ---
-def load_dataframe(file, max_rows, sampling):
-    if file.name.lower().endswith(('.parquet', '.pq')):
-        df = pd.read_parquet(file)
-        if sampling == "10%":
-            df = df.sample(frac=0.1, random_state=42)
-        elif sampling == "1%":
-            df = df.sample(frac=0.01, random_state=42)
-        return df.head(int(max_rows))
-    else:
-        actual_nrows = int(max_rows)
-        if sampling == "10%":
-            actual_nrows = max(1, int(max_rows * 0.1))
-        elif sampling == "1%":
-            actual_nrows = max(1, int(max_rows * 0.01))
-        return pd.read_csv(file, nrows=actual_nrows, low_memory=False)
+def make_histogram(df, column):
+    s = pd.to_numeric(df[column], errors="coerce").dropna()
+    if s.empty:
+        st.warning("選択した列は数値として扱えません。")
+        return None
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.hist(s, bins="auto", color="skyblue", edgecolor="black")
+    ax.set_title(f"{column} の分布")
+    ax.set_xlabel(str(column))
+    ax.set_ylabel("件数")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    return fig
 
-# --- セッションステート初期化 ---
+# -----------------------------
+# メインUI構築
+# -----------------------------
+st.title("🚀 拡張版 CSV前処理・特徴量生成アプリ")
+st.markdown("Streamlit版: CSVを確認し、条件を選んで前処理します。元データは上書きしません。")
+
+# セッションステートの初期化
 if "df" not in st.session_state:
     st.session_state.df = None
-if "current_file" not in st.session_state:
-    st.session_state.current_file = None
-if "merge_success" not in st.session_state:
-    st.session_state.merge_success = False
-if "output_name" not in st.session_state:
-    st.session_state.output_name = "data.csv"
+if "processed_df" not in st.session_state:
+    st.session_state.processed_df = None
+if "logs" not in st.session_state:
+    st.session_state.logs = []
 
-st.title("Kaggle前処理捜査ファイル")
-st.write("※メモリ不足エラーを防ぐため、大容量ファイルは「間引き: 10%以下」または「Parquet形式」を推奨します")
+tab1, tab2, tab3 = st.tabs(["1. データ読み込み・確認", "2. 前処理・特徴量エンジニアリング", "3. 結果確認・ダウンロード"])
 
-st.markdown("### ファイルを選択（CSV / Parquet対応）")
-uploaded_raw_files = st.file_uploader("複数ファイル可・大容量はストリーミング読込", accept_multiple_files=True)
+with tab1:
+    uploaded_file = st.file_uploader("CSVファイルをアップロード", type=["csv"])
+    if uploaded_file is not None:
+        st.session_state.df = read_csv_safely(uploaded_file)
+        st.success(f"読み込み完了: {st.session_state.df.shape[0]}行 × {st.session_state.df.shape[1]}列")
+        
+        st.subheader("データプロファイル")
+        st.dataframe(profile_table(st.session_state.df), use_container_width=True)
+        
+        st.subheader("ヒストグラム")
+        num_cols = get_numeric_columns(st.session_state.df)
+        if num_cols:
+            hist_col = st.selectbox("分布を確認する列を選択", num_cols)
+            if st.button("ヒストグラムを描画"):
+                fig = make_histogram(st.session_state.df, hist_col)
+                if fig:
+                    st.pyplot(fig)
+        else:
+            st.info("数値列がありません。")
 
-col1, col2 = st.columns(2)
-with col1:
-    max_rows = st.number_input("最大行数/ファイル", value=1000000, step=100000)
-with col2:
-    sampling = st.selectbox("間引き", ["全行", "10%", "1%"])
+with tab2:
+    if st.session_state.df is not None:
+        df_cols = st.session_state.df.columns.tolist()
+        default_target = next((c for c in TARGET_CANDIDATES if c in df_cols), df_cols[0])
+        
+        target_col = st.selectbox("目的変数（削除や補完の対象外にします）", ["(なし)"] + df_cols, index=df_cols.index(default_target)+1 if default_target in df_cols else 0)
+        
+        with st.expander("🛠 基本処理 (欠損・重複・異常値)", expanded=True):
+            clean_text = st.checkbox("文字列の不要な空白・改行を整理", value=True)
+            duplicate = st.checkbox("完全一致の重複行を削除", value=False)
+            missing_action = st.radio("欠損値処理", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
+            outlier_action = st.radio("異常値処理", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
 
-if uploaded_raw_files:
-    uploaded_files = [f for f in uploaded_raw_files if f.name.lower().endswith(('.csv', '.parquet', '.pq', ''))]
-    
-    if not uploaded_files:
-        st.warning("有効なCSVまたはParquetファイルを選択してください。")
+        with st.expander("✂️ カラム分割・文字列置換"):
+            st.markdown("任意の文字（ / や , など）を指定してカラムを複数に分割できます。")
+            col1, col2 = st.columns(2)
+            with col1:
+                split_column = st.selectbox("分割する列", ["(なし)"] + df_cols)
+                split_delimiter = st.text_input("区切り文字 (例: / )", value="/")
+            with col2:
+                split_prefix = st.text_input("新しい列名の接頭辞")
+                split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
+            
+            st.divider()
+            col3, col4 = st.columns(2)
+            with col3:
+                replace_column = st.selectbox("文字列を削除する列", ["(なし)"] + df_cols)
+            with col4:
+                remove_text = st.text_input("削除したい文字列 (例: 円, 東京都)")
+
+        with st.expander("✨ 特徴量エンジニアリング"):
+            col1, col2 = st.columns(2)
+            with col1:
+                fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
+            with col2:
+                fe_method = st.selectbox("処理方法", [
+                    "何もしない", "文字数カウント", "数値抽出", 
+                    "キーワード有無フラグ", "ダミー変数化 (One-Hot)", "数値のビン分割 (10分割)"
+                ])
+            col3, col4 = st.columns(2)
+            with col3:
+                fe_prefix = st.text_input("特徴量の新しい列名の接頭辞")
+            with col4:
+                fe_keyword = st.text_input("キーワード（有無フラグ用）")
+
+        with st.expander("🗑 フィルタ・列削除"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                range_column = st.selectbox("数値フィルタ対象列", ["(なし)"] + df_cols)
+            with col2:
+                min_value = st.text_input("最小値")
+            with col3:
+                max_value = st.text_input("最大値")
+            drop_columns_text = st.text_input("削除する列名（カンマ区切り）")
+
+        # 前処理実行ボタン
+        if st.button("前処理を実行", type="primary"):
+            with st.spinner("処理中..."):
+                df = st.session_state.df.copy()
+                log = []
+                target = target_col if target_col != "(なし)" else None
+
+                # 1. 基本処理
+                if clean_text:
+                    text_cols = df.select_dtypes(include=["object", "string"]).columns
+                    for col in text_cols:
+                        df[col] = df[col].map(clean_text_value)
+                    log.append(f"文字列整理：{len(text_cols)}列の空白・改行を整理")
+
+                if missing_action == "数値列を中央値で補完":
+                    for col in get_numeric_columns(df):
+                        if col != target and df[col].isna().any():
+                            df[col] = df[col].fillna(df[col].median())
+                    log.append("欠損値補完：数値列を中央値で補完（目的変数は除く）")
+                elif missing_action == "欠損行を削除":
+                    df = df.dropna().copy()
+                    log.append("欠損行削除：欠損を含む行をすべて削除")
+
+                if duplicate:
+                    df = df.drop_duplicates().copy()
+                    log.append("重複行削除：完全一致する行を削除")
+
+                if outlier_action == "IQRで異常値行を削除":
+                    for col in get_numeric_columns(df):
+                        if col == target: continue
+                        s = pd.to_numeric(df[col], errors="coerce").dropna()
+                        if len(s) < 4: continue
+                        q1, q3 = s.quantile([0.25, 0.75])
+                        iqr = q3 - q1
+                        low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                        df = df[~((df[col] < low) | (df[col] > high))].copy()
+                    log.append("異常値削除：IQR基準で外れ値を含む行を削除")
+
+                # 2. フィルタ・列削除
+                if range_column != "(なし)":
+                    numeric = pd.to_numeric(df[range_column], errors="coerce")
+                    mask = pd.Series(True, index=df.index)
+                    if min_value.strip(): mask &= numeric >= float(min_value)
+                    if max_value.strip(): mask &= numeric <= float(max_value)
+                    df = df.loc[mask].copy()
+                    log.append(f"範囲フィルタ：{range_column} の指定範囲外を削除")
+
+                if drop_columns_text.strip():
+                    to_drop = [x.strip() for x in drop_columns_text.split(",") if x.strip() in df.columns and x.strip() != target]
+                    if to_drop:
+                        df = df.drop(columns=to_drop)
+                        log.append(f"列削除：{', '.join(to_drop)} を削除")
+
+                # 3. 文字列加工・分割
+                if replace_column != "(なし)" and remove_text.strip():
+                    df[replace_column] = df[replace_column].astype(str).str.replace(remove_text, "", regex=False)
+                    log.append(f"文字列削除：{replace_column} から '{remove_text}' を除去")
+
+                if split_column != "(なし)" and split_delimiter:
+                    prefix = split_prefix.strip() or f"{split_column}_分割"
+                    n_parts = int(split_max_parts)
+                    split_values = df[split_column].astype(str).str.split(re.escape(split_delimiter), n=n_parts - 1, expand=True)
+                    for i in range(split_values.shape[1]):
+                        df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip()
+                    log.append(f"カラム分割：{split_column} を '{split_delimiter}' で最大 {n_parts} 分割")
+
+                # 4. 特徴量エンジニアリング
+                if fe_column != "(なし)" and fe_method != "何もしない":
+                    source = df[fe_column]
+                    prefix = fe_prefix.strip() or f"{fe_column}_特徴"
+                    
+                    if fe_method == "文字数カウント":
+                        df[f"{prefix}_文字数"] = source.astype(str).str.len()
+                        log.append(f"特徴量追加：{fe_column} の文字数をカウント")
+                        
+                    elif fe_method == "数値抽出":
+                        extracted = source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
+                        df[f"{prefix}_数値"] = pd.to_numeric(extracted, errors="coerce")
+                        log.append(f"特徴量追加：{fe_column} から数値を抽出")
+                        
+                    elif fe_method == "キーワード有無フラグ":
+                        if fe_keyword.strip():
+                            df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
+                            log.append(f"特徴量追加：{fe_column} に '{fe_keyword}' が含まれるかフラグ化")
+                            
+                    elif fe_method == "ダミー変数化 (One-Hot)":
+                        dummies = pd.get_dummies(source, prefix=prefix, dummy_na=False).astype(int)
+                        df = pd.concat([df, dummies], axis=1)
+                        log.append(f"特徴量追加：{fe_column} をダミー変数化")
+                        
+                    elif fe_method == "数値のビン分割 (10分割)":
+                        num_series = pd.to_numeric(source, errors="coerce")
+                        df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
+                        log.append(f"特徴量追加：{fe_column} を10段階のビンに分割")
+
+                st.session_state.processed_df = df
+                st.session_state.logs = log
+                st.success("前処理が完了しました！「3. 結果確認・ダウンロード」タブを開いてください。")
     else:
-        file_names = [f.name for f in uploaded_files]
-        selected_file_name = st.radio("ベースとなるファイルを選択:", file_names, horizontal=True)
+        st.warning("「1. データ読み込み・確認」タブでCSVをアップロードしてください。")
+
+with tab3:
+    if st.session_state.processed_df is not None:
+        st.subheader("処理ログ")
+        for log in st.session_state.logs:
+            st.write(f"✅ {log}")
+            
+        st.subheader(f"加工後データ (全 {st.session_state.processed_df.shape[0]}行 × {st.session_state.processed_df.shape[1]}列)")
+        st.dataframe(st.session_state.processed_df.head(100), use_container_width=True)
         
-        if st.session_state.current_file != selected_file_name:
-            selected_file = next(f for f in uploaded_files if f.name == selected_file_name)
-            
-            temp_df = load_dataframe(selected_file, max_rows, sampling)
-            optimized_df = reduce_mem_usage(temp_df)
-            
-            st.session_state.df = optimized_df
-            st.session_state.current_file = selected_file_name
-            st.session_state.merge_success = False
-            
-            base_name = selected_file_name.rsplit('.', 1)[0]
-            st.session_state.output_name = f"{base_name}.csv"
-            
-            gc.collect()
-            st.rerun()
-
-        df = st.session_state.df
-        st.write(f"現在のデータ ({st.session_state.output_name}): {df.shape[0]:,}行 × {df.shape[1]}列")
-
-        # タブ構成を拡張（対数変換とラグ作成を追加）
-        tabs = st.tabs([
-            "1.先頭5行", "2.基本統計", "3.欠損", "4.ヒストグラム", 
-            "5.文字カウント", "6.相関", "7.時系列", "8.対数変換", "9.ラグ作成", 
-            "10.クリーニング", "11.エンコード", "12.結合", "💾 保存"
-        ])
-        
-        with tabs[0]:
-            st.write(f"先頭5行 (全{df.shape[0]:,}行)")
-            st.dataframe(df.head().astype(str), width='stretch')
-            
-        with tabs[1]:
-            st.write("基本統計量")
-            st.dataframe(df.describe(include='all').T.astype(str), width='stretch')
-            
-        with tabs[2]:
-            st.write("列ごとの欠損値数")
-            missing = df.isnull().sum().reset_index()
-            missing.columns = ['列名', '欠損数']
-            missing = missing[missing['欠損数'] > 0].sort_values('欠損数', ascending=False)
-            if missing.empty:
-                st.success("欠損値はありません。")
-            else:
-                st.dataframe(missing.astype(str), width='stretch')
-                
-        with tabs[3]:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if numeric_cols:
-                selected_col = st.selectbox("列を選択 (ヒストグラム)", numeric_cols)
-                st.bar_chart(df[selected_col].value_counts(bins=20, sort=False))
-            else:
-                st.warning("数値列がありません。")
-
-        with tabs[4]:
-            st.markdown("### 文字列（カテゴリ）のカウント")
-            cat_cols = df.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
-            if cat_cols:
-                selected_cat_col = st.selectbox("集計する列を選択してください", cat_cols)
-                count_df = df[selected_cat_col].value_counts().reset_index()
-                count_df.columns = [selected_cat_col, '出現回数']
-                st.dataframe(count_df.astype(str), width='stretch')
-            else:
-                st.info("文字列（カテゴリ）の列が見つかりません。")
-
-        with tabs[5]:
-            numeric_df = df.select_dtypes(include=[np.number])
-            if not numeric_df.empty:
-                st.dataframe(numeric_df.corr().style.background_gradient(cmap='coolwarm'), width='stretch')
-            else:
-                st.warning("数値列がありません。")
-
-        with tabs[6]:
-            st.markdown("### 時間特徴量の自動抽出")
-            date_cols = df.select_dtypes(include=['object', 'datetime', 'string']).columns.tolist()
-            if date_cols:
-                target_date_col = st.selectbox("日付が入力されている列を選択", date_cols)
-                if st.button("時間特徴量を生成"):
-                    try:
-                        df[target_date_col] = pd.to_datetime(df[target_date_col])
-                        df['year'] = df[target_date_col].dt.year
-                        df['month'] = df[target_date_col].dt.month
-                        df['day'] = df[target_date_col].dt.day
-                        df['dayofweek'] = df[target_date_col].dt.dayofweek
-                        st.session_state.df = df
-                        st.success("時間特徴量を追加しました！")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"エラー: {e}")
-
-        # --- ★ 8. 対数変換タブ ---
-        with tabs[7]:
-            st.markdown("### 特定カラムの対数変換 (Log Transform)")
-            st.write("売上や価格などの偏った数値データを対数変換（`log1p`）して正規化します。")
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            if numeric_cols:
-                log_target_cols = st.multiselect("対数変換する列を選択（複数選択可）", numeric_cols)
-                if st.button("対数変換を実行"):
-                    if log_target_cols:
-                        df_log = df.copy()
-                        for col in log_target_cols:
-                            # 0や負の値に対応するため log1p (log(1 + x)) を使用
-                            df_log[f"{col}_log1p"] = np.log1p(df_log[col].clip(lower=0))
-                        st.session_state.df = df_log
-                        st.success(f"選択した列の対数変換列（`_log1p`）を追加しました！")
-                        st.rerun()
-                    else:
-                        st.warning("列が選択されていません。")
-            else:
-                st.warning("数値列がありません。")
-
-        # --- ★ 9. ラグ特徴量作成タブ ---
-        with tabs[8]:
-            st.markdown("### 時系列ラグ特徴量の作成 (Lag Features)")
-            st.write("過去の値（例: 1日前、7日前など）を新しい列として作成します。")
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            
-            if numeric_cols:
-                lag_col = st.selectbox("ラグを作成する数値列（例: sales）", numeric_cols, key="lag_col")
-                lag_shift = st.number_input("シフト数（ラグ数。例: 1日前なら 1）", value=1, min_value=1, step=1)
-                
-                # グループ化（店舗ごと、商品ごとなど）のオプション
-                all_cols = df.columns.tolist()
-                use_group = st.checkbox("特定のIDや店舗ごとにグループ化してラグをとる（例: store_nbr単位）")
-                group_col = None
-                if use_group:
-                    group_col = st.selectbox("グループ化する列を選択", all_cols)
-                
-                if st.button("ラグ特徴量を生成"):
-                    try:
-                        df_lag = df.copy()
-                        new_col_name = f"{lag_col}_lag{lag_shift}"
-                        
-                        if use_group and group_col:
-                            df_lag[new_col_name] = df_lag.groupby(group_col)[lag_col].shift(lag_shift)
-                        else:
-                            df_lag[new_col_name] = df_lag[lag_col].shift(lag_shift)
-                            
-                        st.session_state.df = df_lag
-                        st.success(f"ラグ特徴量 `({new_col_name})` を追加しました！")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"ラグ作成エラー: {e}")
-            else:
-                st.warning("数値列がありません。")
-
-        with tabs[9]:
-            st.markdown("### データのクリーニング")
-            clean_option = st.radio("操作を選択:", ["列の削除", "欠損行の削除"], horizontal=True)
-
-            if clean_option == "列の削除":
-                cols_to_drop = st.multiselect("削除する不要な列を選択してください", df.columns.tolist())
-                if st.button("列を削除"):
-                    if cols_to_drop:
-                        st.session_state.df = df.drop(columns=cols_to_drop)
-                        st.rerun()
-            
-            elif clean_option == "欠損行の削除":
-                missing_rows = df.isnull().any(axis=1).sum()
-                st.write(f"欠損を含む行数: {missing_rows:,}行")
-                if missing_rows > 0 and st.button("すべて削除"):
-                    st.session_state.df = df.dropna()
-                    st.rerun()
-
-        with tabs[10]:
-            st.markdown("### ワンホットエンコーディング")
-            cat_cols = df.select_dtypes(include=['object', 'category', 'string']).columns.tolist()
-            if cat_cols:
-                target_cols = st.multiselect("エンコードする列を選択してください", cat_cols)
-                if st.button("実行"):
-                    if target_cols:
-                        st.session_state.df = pd.get_dummies(df, columns=target_cols, drop_first=False)
-                        st.rerun()
-
-        with tabs[11]:
-            st.markdown("### データのマージ (キー結合)")
-            available_files = [f for f in uploaded_files if f.name != selected_file_name]
-            
-            if available_files:
-                merge_target_name = st.selectbox("結合する追加ファイルを選択", [f.name for f in available_files])
-                
-                if merge_target_name:
-                    target_file = next(f for f in available_files if f.name == merge_target_name)
-                    
-                    df_target_raw = load_dataframe(target_file, max_rows, sampling="全行")
-                    df_target = reduce_mem_usage(df_target_raw)
-                    
-                    col1_m, col2_m, col3_m = st.columns(3)
-                    with col1_m:
-                        left_key = st.selectbox("ベースデータのキー列", df.columns.tolist())
-                    with col2_m:
-                        right_key = st.selectbox(f"{merge_target_name}のキー列", df_target.columns.tolist())
-                    with col3_m:
-                        how = st.selectbox("結合方法", ["left", "inner", "outer", "right"])
-                    
-                    force_str = st.checkbox("キーの型を強制的に「文字列」に統一して結合する", value=True)
-                        
-                    if st.button(f"{merge_target_name} をマージ実行"):
-                        try:
-                            if force_str:
-                                df[left_key] = df[left_key].astype(str)
-                                df_target[right_key] = df_target[right_key].astype(str)
-
-                            df_merged = pd.merge(df, df_target, left_on=left_key, right_on=right_key, how=how)
-                            
-                            base_name = st.session_state.output_name.replace('.csv', '')
-                            add_name = merge_target_name.rsplit('.', 1)[0]
-                            st.session_state.output_name = f"{base_name}_{add_name}.csv"
-                            
-                            st.session_state.df = df_merged
-                            st.session_state.merge_success = True
-                            
-                            del df_target
-                            gc.collect()
-                            
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"結合エラーが発生しました。詳細: {e}")
-                            
-                if st.session_state.merge_success:
-                    st.success("✅ 結合成功！一番右の「💾 保存」タブ、または下のボタンからダウンロードできます。")
-                    
-                    st.markdown("---")
-                    st.markdown("#### ⬇ すぐにダウンロードする")
-                    col_dl_m1, col_dl_m2 = st.columns(2)
-                    with col_dl_m1:
-                        st.download_button(
-                            label="⬇ CSVで保存",
-                            data=df.to_csv(index=False).encode('utf-8'),
-                            file_name=st.session_state.output_name,
-                            mime='text/csv',
-                            use_container_width=True
-                        )
-                    with col_dl_m2:
-                        p_buf = io.BytesIO()
-                        df.to_parquet(p_buf, index=False)
-                        p_name = st.session_state.output_name.replace('.csv', '.parquet')
-                        st.download_button(
-                            label="⬇ Parquetで保存",
-                            data=p_buf.getvalue(),
-                            file_name=p_name,
-                            mime='application/octet-stream',
-                            use_container_width=True
-                        )
-            else:
-                st.warning("結合機能を使うには、最初の画面でファイルを2つ以上アップロードしてください。")
-
-        # 13番目のタブ（💾 保存）
-        with tabs[12]:
-            st.write(f"現在のデータ ({st.session_state.output_name}) をダウンロードします。お好きな形式を選んでください。")
-            
-            col_dl1, col_dl2 = st.columns(2)
-            
-            with col_dl1:
-                csv_data = df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="⬇ CSVで保存 (汎用)",
-                    data=csv_data,
-                    file_name=st.session_state.output_name,
-                    mime='text/csv',
-                    use_container_width=True
-                )
-                
-            with col_dl2:
-                parquet_buffer = io.BytesIO()
-                df.to_parquet(parquet_buffer, index=False)
-                parquet_name = st.session_state.output_name.replace('.csv', '.parquet')
-                st.download_button(
-                    label="⬇ Parquetで保存 (軽量・高速)",
-                    data=parquet_buffer.getvalue(),
-                    file_name=parquet_name,
-                    mime='application/octet-stream',
-                    use_container_width=True
-                )
-else:
-    st.info("上にファイルをアップロードして開始してください。")
+        # CSVダウンロード用データの作成
+        csv = st.session_state.processed_df.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            label="📥 加工済みCSVをダウンロード",
+            data=csv,
+            file_name="preprocessed_data.csv",
+            mime="text/csv",
+            type="primary"
+        )
+    else:
+        st.info("前処理が完了すると、ここに結果とダウンロードボタンが表示されます。")
