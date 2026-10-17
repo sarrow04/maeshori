@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+import io
 
 st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 
@@ -12,16 +13,21 @@ st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice"]
 
 @st.cache_data
-def read_csv_safely(file_bytes):
-    errors = []
-    for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
-        try:
-            file_bytes.seek(0)
-            return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
-        except Exception as e:
-            errors.append(f"{enc}: {e}")
-    st.error("CSVを読み込めませんでした。\n" + "\n".join(errors))
-    st.stop()
+def read_file_safely(file_bytes, file_name):
+    if file_name.endswith('.parquet'):
+        return pd.read_parquet(file_bytes)
+    elif file_name.endswith('.csv.gz'):
+        return pd.read_csv(file_bytes, compression='gzip', low_memory=False)
+    else:
+        errors = []
+        for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
+            try:
+                file_bytes.seek(0)
+                return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
+            except Exception as e:
+                errors.append(f"{enc}: {e}")
+        st.error("ファイルを読み込めませんでした。\n" + "\n".join(errors))
+        st.stop()
 
 def clean_text_value(value):
     if pd.isna(value):
@@ -70,10 +76,20 @@ def make_histogram(df, column):
     fig.tight_layout()
     return fig
 
+def convert_df(df, format_type):
+    if format_type == "Parquet形式 (.parquet)":
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False)
+        return buffer.getvalue(), "parquet", "application/octet-stream"
+    elif format_type == "GZIP圧縮CSV (.csv.gz)":
+        return df.to_csv(index=False, encoding="utf-8-sig", compression="gzip").encode("utf-8"), "csv.gz", "application/gzip"
+    else:
+        return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8"), "csv", "text/csv"
+
 # -----------------------------
-# メインUI構築 (左右2カラムレイアウト)
+# メインUI構築
 # -----------------------------
-st.title("🚀 拡張版 CSV前処理・特徴量生成アプリ")
+st.title("🚀 拡張版 データ前処理・特徴量生成アプリ")
 
 if "df" not in st.session_state:
     st.session_state.df = None
@@ -81,37 +97,38 @@ if "processed_df" not in st.session_state:
     st.session_state.processed_df = None
 if "logs" not in st.session_state:
     st.session_state.logs = []
+if "original_size" not in st.session_state:
+    st.session_state.original_size = 0
 
-# 画面を左（設定用）と右（データ確認用）に分割
 col_ctrl, col_view = st.columns([4, 6], gap="large")
 
 with col_ctrl:
     st.header("⚙️ 設定と実行")
     
-    # 1. 読み込みセクション
     with st.container(border=True):
         st.subheader("1. データ読み込み")
         read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 結合（コンペ用）"], horizontal=True)
         
         if read_mode == "単一ファイル":
-            uploaded_file = st.file_uploader("CSVファイルをアップロード", type=["csv"])
+            uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)", type=["csv", "gz", "parquet"])
             if uploaded_file is not None:
-                df = read_csv_safely(uploaded_file)
+                df = read_file_safely(uploaded_file, uploaded_file.name)
                 df["_source_"] = "single"
                 st.session_state.df = df
+                st.session_state.original_size = uploaded_file.size
         else:
             c1, c2 = st.columns(2)
-            with c1: train_file = st.file_uploader("Train (train.csv)", type=["csv"])
-            with c2: test_file = st.file_uploader("Test (test.csv)", type=["csv"])
+            with c1: train_file = st.file_uploader("Train", type=["csv", "gz", "parquet"])
+            with c2: test_file = st.file_uploader("Test", type=["csv", "gz", "parquet"])
                 
             if train_file is not None and test_file is not None:
-                train_df = read_csv_safely(train_file)
-                test_df = read_csv_safely(test_file)
+                train_df = read_file_safely(train_file, train_file.name)
+                test_df = read_file_safely(test_file, test_file.name)
                 train_df["_source_"] = "train"
                 test_df["_source_"] = "test"
                 st.session_state.df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+                st.session_state.original_size = train_file.size + test_file.size
 
-    # 2. 前処理セクション（データが読み込まれている時のみ表示）
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
         default_target = next((c for c in TARGET_CANDIDATES if c in df_cols), df_cols[0])
@@ -166,7 +183,7 @@ with col_ctrl:
             with c3: max_value = st.text_input("最大値")
             drop_columns_text = st.text_input("削除する列名（カンマ区切り）")
 
-        st.write("") # スペーサー
+        st.write("")
         if st.button("🚀 前処理を実行する", type="primary", use_container_width=True):
             with st.spinner("処理中..."):
                 df = st.session_state.df.copy()
@@ -289,7 +306,7 @@ with col_view:
     st.header("📊 データビュー")
     
     if st.session_state.df is None:
-        st.info("👈 左側のメニューからCSVファイルをアップロードしてください。")
+        st.info("👈 左側のメニューからファイルをアップロードしてください。")
     else:
         view_tabs = st.tabs(["処理前データ", "プロファイル・分布", "処理後データ・ダウンロード"])
         
@@ -315,25 +332,41 @@ with col_view:
         with view_tabs[2]:
             if st.session_state.processed_df is not None:
                 display_proc = st.session_state.processed_df.drop(columns=["_source_"], errors="ignore")
-                st.success("✅ 前処理が完了しました！")
+                st.success("処理が完了しました！")
                 with st.expander("📝 処理ログを確認", expanded=False):
                     for log in st.session_state.logs:
                         st.write(f"- {log}")
                 
                 st.markdown(f"**加工後データ: {display_proc.shape[0]}行 × {display_proc.shape[1]}列**")
-                st.dataframe(display_proc.head(100), height=400, use_container_width=True)
+                st.dataframe(display_proc.head(100), height=300, use_container_width=True)
                 
                 st.markdown("### 📥 ダウンロード")
+                save_format = st.radio("「**保存形式を選択**」", ["通常のCSV (.csv)", "GZIP圧縮CSV (.csv.gz)", "Parquet形式 (.parquet)"])
+                
                 source_vals = st.session_state.processed_df.get("_source_", pd.Series()).unique()
+                
                 if "train" in source_vals and "test" in source_vals:
                     train_out = st.session_state.processed_df[st.session_state.processed_df["_source_"] == "train"].drop(columns=["_source_"])
                     test_out = st.session_state.processed_df[st.session_state.processed_df["_source_"] == "test"].drop(columns=["_source_"])
+                    
+                    train_data, ext, mime = convert_df(train_out, save_format)
+                    test_data, _, _ = convert_df(test_out, save_format)
+                    
+                    total_new_size = len(train_data) + len(test_data)
+                    reduction = (1 - total_new_size / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
+                    
+                    st.write(f"処理後サイズ合計: {total_new_size / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
+                    
                     dl_c1, dl_c2 = st.columns(2)
                     with dl_c1:
-                        st.download_button("Trainデータをダウンロード", train_out.to_csv(index=False, encoding="utf-8-sig"), "preprocessed_train.csv", "text/csv", type="primary")
+                        st.download_button("Trainデータをダウンロード", train_data, f"preprocessed_train.{ext}", mime, type="primary")
                     with dl_c2:
-                        st.download_button("Testデータをダウンロード", test_out.to_csv(index=False, encoding="utf-8-sig"), "preprocessed_test.csv", "text/csv", type="primary")
+                        st.download_button("Testデータをダウンロード", test_data, f"preprocessed_test.{ext}", mime, type="primary")
                 else:
-                    st.download_button("加工済みCSVをダウンロード", display_proc.to_csv(index=False, encoding="utf-8-sig"), "preprocessed_data.csv", "text/csv", type="primary")
+                    out_data, ext, mime = convert_df(display_proc, save_format)
+                    reduction = (1 - len(out_data) / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
+                    
+                    st.write(f"処理後サイズ: {len(out_data) / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
+                    st.download_button("「**ダウンロード**」", out_data, f"preprocessed_data.{ext}", mime, type="primary")
             else:
                 st.info("左側のメニューで「🚀 前処理を実行する」ボタンを押すと、ここに結果が表示されます。")
