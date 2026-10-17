@@ -164,20 +164,20 @@ with col_ctrl:
             missing_action = st.radio("欠損値処理", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
             outlier_action = st.radio("異常値処理", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
 
-        with st.expander("✂️ カラム分割・文字列置換"):
+        with st.expander("✂️ セル内の文字消去・カラム分割"):
             c1, c2 = st.columns(2)
             with c1:
-                split_column = st.selectbox("分割する列", ["(なし)"] + df_cols)
-                split_delimiter = st.text_input("区切り文字 (例: / )", value="/", key="split_delim")
+                replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + df_cols)
             with c2:
-                split_prefix = st.text_input("新しい列名の接頭辞")
-                split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
+                remove_text = st.text_input("消したい文字 (例: 円, 東京都)")
             st.divider()
             c3, c4 = st.columns(2)
             with c3:
-                replace_column = st.selectbox("文字列を削除する列", ["(なし)"] + df_cols)
+                split_column = st.selectbox("分割する列", ["(なし)"] + df_cols)
+                split_delimiter = st.text_input("区切り文字 (例: / )", value="/", key="split_delim")
             with c4:
-                remove_text = st.text_input("削除したい文字列 (例: 円)")
+                split_prefix = st.text_input("新しい列名の接頭辞")
+                split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
 
         with st.expander("✨ 特徴量エンジニアリング", expanded=True):
             c1, c2 = st.columns(2)
@@ -198,15 +198,15 @@ with col_ctrl:
             with c5:
                 fe_delimiter = st.text_input("区切り文字（ダミー用）", value="/", key="fe_delim")
 
-        with st.expander("🗑 フィルタ・列削除"):
-            c1, c2, c3 = st.columns(3)
+        with st.expander("🗑 列まるごと削除・数値フィルタ"):
+            drop_columns = st.multiselect("🗑 列（カラム）をまるごと削除", df_cols, help="クリックして消したい列を複数選べます")
+            st.divider()
+            c1, c2 = st.columns(2)
             with c1: 
                 range_column = st.selectbox("数値フィルタ列", ["(なし)"] + df_cols)
             with c2: 
-                min_value = st.text_input("最小値")
-            with c3: 
-                max_value = st.text_input("最大値")
-            drop_columns_text = st.text_input("削除する列名（カンマ区切り）")
+                min_value = st.text_input("残す最小値")
+                max_value = st.text_input("残す最大値")
 
         st.write("")
         if st.button("🚀 前処理を実行する", type="primary", use_container_width=True):
@@ -254,15 +254,9 @@ with col_ctrl:
                     df = df.loc[mask].copy()
                     log.append(f"範囲フィルタ：{range_column} をフィルタ")
 
-                if drop_columns_text.strip():
-                    to_drop = [x.strip() for x in drop_columns_text.split(",") if x.strip() in df.columns and x.strip() not in [target, "_source_"]]
-                    if to_drop:
-                        df = df.drop(columns=to_drop)
-                        log.append(f"列削除：{', '.join(to_drop)} を削除")
-
                 if replace_column != "(なし)" and remove_text.strip():
                     df[replace_column] = df[replace_column].astype(str).str.replace(remove_text, "", regex=False)
-                    log.append(f"文字列削除：{replace_column} から '{remove_text}' を除去")
+                    log.append(f"セル内文字消去：{replace_column} から '{remove_text}' を消去")
 
                 if split_column != "(なし)" and split_delimiter:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
@@ -323,6 +317,13 @@ with col_ctrl:
                         num_series = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
                         log.append(f"特徴量追加：{fe_column} をビン分割")
+
+                # ここで列削除を実行（特徴量作成より後にすることで、作成に使った元の列を消せる）
+                if drop_columns:
+                    to_drop = [c for c in drop_columns if c in df.columns and c not in [target, "_source_"]]
+                    if to_drop:
+                        df = df.drop(columns=to_drop)
+                        log.append(f"列まるごと削除：{', '.join(to_drop)} を削除")
 
                 st.session_state.processed_df = df
                 st.session_state.logs = log
