@@ -228,8 +228,15 @@ with col_ctrl:
                             df[col] = df[col].fillna(train_median)
                     log.append("欠損値補完：数値列を補完（Trainの中央値を使用）")
                 elif missing_action == "欠損行を削除":
-                    df = df.dropna().copy()
-                    log.append("欠損行削除：欠損を含む行を削除")
+                    # バグ修正：安全のため、目的変数が空欄の行のみ消すか、全カラムが空欄の行だけ消すように変更
+                    if target:
+                        before_len = len(df)
+                        df = df.dropna(subset=[target]).copy()
+                        log.append(f"欠損行削除：目的変数 '{target}' が欠損の {before_len - len(df)} 行のみ削除")
+                    else:
+                        before_len = len(df)
+                        df = df.dropna(how='all').copy()
+                        log.append(f"欠損行削除：すべての列が空欄の {before_len - len(df)} 行のみ削除")
 
                 if duplicate:
                     df = df.drop_duplicates().copy()
@@ -249,10 +256,15 @@ with col_ctrl:
                 if range_column != "(なし)":
                     numeric = pd.to_numeric(df[range_column], errors="coerce")
                     mask = pd.Series(True, index=df.index)
-                    if min_value.strip(): mask &= numeric >= float(min_value)
-                    if max_value.strip(): mask &= numeric <= float(max_value)
+                    if min_value.strip(): 
+                        try: mask &= numeric >= float(min_value)
+                        except Exception: pass
+                    if max_value.strip(): 
+                        try: mask &= numeric <= float(max_value)
+                        except Exception: pass
+                    before_len = len(df)
                     df = df.loc[mask].copy()
-                    log.append(f"範囲フィルタ：{range_column} をフィルタ")
+                    log.append(f"範囲フィルタ：{range_column} で {before_len - len(df)}行を削除")
 
                 if replace_column != "(なし)" and remove_text.strip():
                     remove_words = [w.strip() for w in remove_text.split(",") if w.strip()]
@@ -263,11 +275,21 @@ with col_ctrl:
                 if split_column != "(なし)" and split_delimiter:
                     prefix = split_prefix.strip() or f"{split_column}_分割"
                     n_parts = int(split_max_parts)
-                    split_values = df[split_column].fillna("").astype(str).str.split(split_delimiter, n=n_parts - 1, expand=True)
-                    for i in range(split_values.shape[1]):
-                        df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip()
-                        df[f"{prefix}_{i+1}"] = df[f"{prefix}_{i+1}"].replace("", np.nan)
-                    log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割")
+                    
+                    # バグ修正：半角/全角スラッシュのすれ違いを吸収
+                    temp_series = df[split_column].fillna("").astype(str)
+                    if split_delimiter == "/":
+                        temp_series = temp_series.str.replace("／", "/")
+                        
+                    split_values = temp_series.str.split(split_delimiter, n=n_parts - 1, expand=True)
+                    
+                    # バグ修正：分割数が足りなくても必ず n_parts 列分作成する
+                    for i in range(n_parts):
+                        if i < split_values.shape[1]:
+                            df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip().replace("", np.nan)
+                        else:
+                            df[f"{prefix}_{i+1}"] = np.nan
+                    log.append(f"カラム分割：{split_column} を {n_parts} 分割展開")
 
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
@@ -311,11 +333,24 @@ with col_ctrl:
                         log.append(f"特徴量追加：{fe_column} をダミー化")
                     elif fe_method == "マルチラベルダミー化 (区切り文字)":
                         delim = fe_delimiter if fe_delimiter else "/"
-                        dummies = source.astype(str).str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True).str.get_dummies(sep=delim)
+                        
+                        # バグ修正：空欄(NaN)を文字列の"nan"としてダミー化しないように処理
+                        temp_series = source.fillna("").astype(str)
+                        if delim == "/":
+                            temp_series = temp_series.str.replace("／", "/")
+                            
+                        temp_series = temp_series.str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True)
+                        dummies = temp_series.str.get_dummies(sep=delim)
+                        
+                        if "" in dummies.columns:
+                            dummies = dummies.drop(columns=[""])
+                        if "nan" in dummies.columns:
+                            dummies = dummies.drop(columns=["nan"])
+                            
                         if prefix:
                             dummies.columns = [f"{prefix}_{c}" for c in dummies.columns]
                         df = pd.concat([df, dummies], axis=1)
-                        log.append(f"特徴量追加：{fe_column} をマルチラベルダミー化")
+                        log.append(f"特徴量追加：{fe_column} をマルチラベルダミー化（{len(dummies.columns)}列生成）")
                     elif fe_method == "数値のビン分割 (10分割)":
                         num_series = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
