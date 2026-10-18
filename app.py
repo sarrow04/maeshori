@@ -25,7 +25,6 @@ def fix_dataframe_for_streamlit(df):
         df.columns = cols
     return df.reset_index(drop=True)
 
-# 【修正】キャッシュ機能（@st.cache_data）を削除しました。これが読み込みバグの元凶になりやすいためです。
 def read_file_safely(file_bytes, file_name):
     fname_lower = file_name.lower()
     
@@ -47,7 +46,6 @@ def read_file_safely(file_bytes, file_name):
         errors = []
         for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
             try:
-                # ファイルの先頭に戻して読み込みを試す
                 if hasattr(file_bytes, 'seek'):
                     file_bytes.seek(0)
                 return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
@@ -215,7 +213,6 @@ with col_ctrl:
                             test_name = next((f for f in file_list if 'test' in f.lower() and not f.endswith('/')), None)
                             
                             if train_name and test_name:
-                                # バイトデータとして安全に取り出す
                                 train_bytes = io.BytesIO(z.read(train_name))
                                 test_bytes = io.BytesIO(z.read(test_name))
                                 
@@ -272,6 +269,12 @@ with col_ctrl:
                 split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
 
         with st.expander("✨ 特徴量エンジニアリング", expanded=True):
+            # ワンホットエンコーディングを一括で簡単に選べるように改良
+            st.markdown("##### 🔄 一括カテゴリダミー化 (One-Hot)")
+            onehot_columns = st.multiselect("ダミー化（0/1に変換）する列を複数選択", df_cols, help="選択した列をすべてダミー変数化します（元の列は自動で削除されます）")
+            
+            st.divider()
+            st.markdown("##### 🔍 その他の個別処理")
             c1, c2 = st.columns(2)
             with c1:
                 fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
@@ -279,7 +282,7 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法", [
                     "何もしない", "文字数カウント", "最初の数値を抽出", 
                     "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (新築=0)", 
-                    "キーワード有無フラグ", "ダミー変数化 (One-Hot)", 
+                    "キーワード有無フラグ", 
                     "マルチラベルダミー化 (区切り文字)", "数値のビン分割 (10分割)"
                 ])
             c3, c4, c5 = st.columns(3)
@@ -288,7 +291,7 @@ with col_ctrl:
             with c4:
                 fe_keyword = st.text_input("キーワード（フラグ用）")
             with c5:
-                fe_delimiter = st.text_input("区切り文字 (スペースで分ける場合は「空白」と入力)", value="/", key="fe_delim")
+                fe_delimiter = st.text_input("区切り文字 (スペースは「空白」)", value="/", key="fe_delim")
 
         with st.expander("🗑 列まるごと削除・数値フィルタ"):
             drop_columns = st.multiselect("🗑 列（カラム）をまるごと削除", df_cols, help="クリックして消したい列を複数選べます")
@@ -402,6 +405,11 @@ with col_ctrl:
                             df[f"{prefix}_{i+1}"] = np.nan
                     log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割展開")
 
+                # 【追加】一括One-Hot処理（dtype=intを指定してプレビューのバグを防ぐ）
+                if onehot_columns:
+                    df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
+                    log.append(f"一括ダミー化：{', '.join(onehot_columns)} をOne-Hot変換")
+
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
@@ -438,10 +446,6 @@ with col_ctrl:
                         if fe_keyword.strip():
                             df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
                             log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
-                    elif fe_method == "ダミー変数化 (One-Hot)":
-                        dummies = pd.get_dummies(source, prefix=prefix, dummy_na=False).astype(int)
-                        df = pd.concat([df, dummies], axis=1)
-                        log.append(f"特徴量追加：{fe_column} をダミー化")
                     elif fe_method == "マルチラベルダミー化 (区切り文字)":
                         delim = fe_delimiter if fe_delimiter else "/"
                         temp_series = source.fillna("").astype(str)
@@ -455,7 +459,8 @@ with col_ctrl:
                             temp_series = temp_series.str.replace(rf'\s*{re.escape(delim)}\s*', delim, regex=True)
                             actual_delim = delim
                             
-                        dummies = temp_series.str.get_dummies(sep=actual_delim)
+                        # dtype=int を付与して真偽値になるのを防ぐ
+                        dummies = temp_series.str.get_dummies(sep=actual_delim).astype(int)
                         
                         if "" in dummies.columns:
                             dummies = dummies.drop(columns=[""])
@@ -517,7 +522,8 @@ with col_view:
                         st.write(f"- {log}")
                 
                 st.markdown(f"**加工後データ: {display_proc.shape[0]}行 × {display_proc.shape[1]}列**")
-                st.dataframe(display_proc.head(100), height=300, use_container_width=True)
+                # 最初の1000行だけプレビュー表示して重くなるのを防ぐ
+                st.dataframe(display_proc.head(1000), height=300, use_container_width=True)
                 
                 st.markdown("### 🔄 さらに前処理を続ける場合")
                 st.info("このボタンを押すと、現在の結果をベースにして、新しくできたカラムなどを対象にさらに前処理（列削除など）を続けることができます。")
