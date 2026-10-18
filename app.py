@@ -144,6 +144,7 @@ with col_ctrl:
     with c_head1:
         st.header("⚙️ 設定と実行")
     with c_head2:
+        # 手動でのみリセットできるようにする
         if st.session_state.df is not None:
             if st.button("🔄 最初からやり直す", help="元のアップロードデータにリセットします", use_container_width=True):
                 st.session_state.current_file_id = None
@@ -167,12 +168,6 @@ with col_ctrl:
                     st.session_state.current_file_id = fid
                     st.session_state.processed_df = None
                     st.session_state.logs = []
-            else:
-                if st.session_state.current_file_id is not None:
-                    st.session_state.current_file_id = None
-                    st.session_state.df = None
-                    st.session_state.processed_df = None
-                    st.rerun()
                     
         elif read_mode == "Train / Test 個別":
             c1, c2 = st.columns(2)
@@ -194,12 +189,6 @@ with col_ctrl:
                     st.session_state.current_file_id = fid
                     st.session_state.processed_df = None
                     st.session_state.logs = []
-            else:
-                if st.session_state.current_file_id is not None:
-                    st.session_state.current_file_id = None
-                    st.session_state.df = None
-                    st.session_state.processed_df = None
-                    st.rerun()
                     
         elif read_mode == "Train / Test まとめてZIP":
             uploaded_zip = st.file_uploader("ダウンロードしたZIPファイルをそのままアップロード")
@@ -231,12 +220,6 @@ with col_ctrl:
                                 st.error("ZIPファイルの中に 'train' と 'test' のデータが見つかりませんでした。")
                     except Exception as e:
                         st.error(f"ZIPファイルの読み込みに失敗しました: {e}")
-            else:
-                if st.session_state.current_file_id is not None:
-                    st.session_state.current_file_id = None
-                    st.session_state.df = None
-                    st.session_state.processed_df = None
-                    st.rerun()
 
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
