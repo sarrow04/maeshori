@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import re
 import io
+import zipfile
 
 st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 
@@ -141,7 +142,8 @@ with col_ctrl:
 
     with st.container(border=True):
         st.subheader("1. データ読み込み")
-        read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 結合（コンペ用）"], horizontal=True)
+        # 読み込みモードに「ZIP一括」を追加
+        read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 個別", "Train / Test まとめてZIP"], horizontal=True)
         
         if read_mode == "単一ファイル":
             uploaded_file = st.file_uploader("ファイルをアップロード (.csv, .csv.gz, .parquet)")
@@ -161,7 +163,8 @@ with col_ctrl:
                     st.session_state.df = None
                     st.session_state.processed_df = None
                     st.rerun()
-        else:
+                    
+        elif read_mode == "Train / Test 個別":
             c1, c2 = st.columns(2)
             with c1: 
                 train_file = st.file_uploader("Train")
@@ -180,6 +183,43 @@ with col_ctrl:
                     st.session_state.current_file_id = fid
                     st.session_state.processed_df = None
                     st.session_state.logs = []
+            else:
+                if st.session_state.current_file_id is not None:
+                    st.session_state.current_file_id = None
+                    st.session_state.df = None
+                    st.session_state.processed_df = None
+                    st.rerun()
+                    
+        elif read_mode == "Train / Test まとめてZIP":
+            uploaded_zip = st.file_uploader("ダウンロードしたZIPファイルをそのままアップロード")
+            if uploaded_zip is not None:
+                fid = f"zip_{uploaded_zip.name}_{uploaded_zip.size}"
+                if st.session_state.current_file_id != fid:
+                    try:
+                        with zipfile.ZipFile(uploaded_zip, 'r') as z:
+                            file_list = z.namelist()
+                            # ZIP内から「train」「test」という文字が含まれるファイルを自動探索
+                            train_name = next((f for f in file_list if 'train' in f.lower() and not f.endswith('/')), None)
+                            test_name = next((f for f in file_list if 'test' in f.lower() and not f.endswith('/')), None)
+                            
+                            if train_name and test_name:
+                                train_bytes = io.BytesIO(z.read(train_name))
+                                test_bytes = io.BytesIO(z.read(test_name))
+                                
+                                train_df = read_file_safely(train_bytes, train_name)
+                                test_df = read_file_safely(test_bytes, test_name)
+                                
+                                train_df["_source_"] = "train"
+                                test_df["_source_"] = "test"
+                                st.session_state.df = pd.concat([train_df, test_df], axis=0, ignore_index=True)
+                                st.session_state.original_size = uploaded_zip.size
+                                st.session_state.current_file_id = fid
+                                st.session_state.processed_df = None
+                                st.session_state.logs = []
+                            else:
+                                st.error("ZIPファイルの中に 'train' と 'test' のデータが見つかりませんでした。")
+                    except Exception as e:
+                        st.error(f"ZIPファイルの読み込みに失敗しました: {e}")
             else:
                 if st.session_state.current_file_id is not None:
                     st.session_state.current_file_id = None
@@ -493,11 +533,18 @@ with col_view:
                     
                     st.write(f"処理後サイズ合計: {total_new_size / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
                     
-                    dl_c1, dl_c2 = st.columns(2)
-                    with dl_c1:
-                        st.download_button("Trainデータをダウンロード", train_data, f"preprocessed_train.{ext}", mime, type="primary")
-                    with dl_c2:
-                        st.download_button("Testデータをダウンロード", test_data, f"preprocessed_test.{ext}", mime, type="primary")
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        zip_file.writestr(f"preprocessed_train.{ext}", train_data)
+                        zip_file.writestr(f"preprocessed_test.{ext}", test_data)
+                    
+                    st.download_button(
+                        label="📥 TrainとTestをまとめてダウンロード (ZIP)",
+                        data=zip_buffer.getvalue(),
+                        file_name="preprocessed_data.zip",
+                        mime="application/zip",
+                        type="primary"
+                    )
                 else:
                     out_data, ext, mime = convert_df(display_proc, save_format)
                     reduction = (1 - len(out_data) / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
