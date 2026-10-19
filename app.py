@@ -240,6 +240,9 @@ with col_ctrl:
             with c2:
                 ml_delim = st.text_input("区切り文字 (「／」や「空白」)", value="／")
             
+            # 【新規追加】元の列を自動削除するオプション
+            ml_drop_original = st.checkbox("処理後に元の列（元データの文字列の列）を自動で削除する", value=True)
+            
             st.divider()
             st.markdown("##### 🔄 通常のカテゴリダミー化 (One-Hot)")
             onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を複数選択", df_cols, help="選択した列をすべてダミー変数化します（元の列は自動で削除されます）")
@@ -291,10 +294,23 @@ with col_ctrl:
         # 大掃除
         # ----------------------------------------------------------------
         with st.expander("🗑 STEP4: 大掃除 (いらない列の削除)", expanded=True):
-            st.info("💡 STEP1でフラグ化したあとの「もう使わない元のテキスト列」や、分析に不要な列をここでまとめて捨てます。")
-            drop_columns = st.multiselect("🗑 削除する列（カラム）を複数選択", df_cols)
+            st.info("💡 STEP1でフラグ化したあとに不要になった列を、名前や出現回数でまとめて一掃できます！")
             
+            # 【新規追加】文字指定で一括削除
+            st.markdown("##### 🧹 カラム名（列の名前）を指定して一括削除")
+            drop_by_name = st.text_input("列名にこの文字が含まれていたらすべて削除 (カンマ区切り可)", help="例: 脱衣所, 洗面台独立")
+            
+            # 【新規追加】レアなフラグを自動削除
             st.divider()
+            st.markdown("##### 📉 マイナーなフラグ列を自動削除")
+            min_count = st.number_input("出現件数（「1」の数）がこれ以下の列を自動削除", min_value=0, value=0, help="例: 10 と設定すると、10件以下しか該当しなかったマイナーな設備列などを一掃します。（ノイズ削減に有効です）")
+
+            st.divider()
+            st.markdown("##### 🗑 手動で選んで削除")
+            drop_columns = st.multiselect("リストから選択", df_cols)
+
+            st.divider()
+            st.markdown("##### 🎯 数値の範囲でフィルタ (行の削除)")
             c1, c2 = st.columns(2)
             with c1: 
                 range_column = st.selectbox("数値フィルタ列 (指定範囲外を削除)", ["(なし)"] + df_cols)
@@ -338,6 +354,11 @@ with col_ctrl:
                     dummies.columns = [f"{prefix}_{c}" for c in dummies.columns]
                     df = pd.concat([df, dummies], axis=1)
                     log.append(f"🪄 STEP1一括フラグ化：{ml_column} を {len(dummies.columns)}列のダミー変数に変換")
+                    
+                    # オプション：元の列を削除
+                    if ml_drop_original and ml_column in df.columns:
+                        df = df.drop(columns=[ml_column])
+                        log.append(f"🪄 STEP1一括フラグ化：元の '{ml_column}' 列を自動削除しました")
 
                 if onehot_columns:
                     df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
@@ -467,11 +488,36 @@ with col_ctrl:
                     log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割展開")
 
                 # STEP4: 大掃除
+                if drop_by_name.strip():
+                    drop_words = [w.strip() for w in drop_by_name.split(",") if w.strip()]
+                    to_drop_by_name = []
+                    for col in df.columns:
+                        if col in [target, "_source_"]: continue
+                        if any(w in col for w in drop_words):
+                            to_drop_by_name.append(col)
+                    if to_drop_by_name:
+                        df = df.drop(columns=to_drop_by_name)
+                        log.append(f"🧹 名前で一括削除：名前に '{', '.join(drop_words)}' を含む {len(to_drop_by_name)}列 を削除")
+
+                if min_count > 0:
+                    rare_dropped = 0
+                    for col in list(df.columns):
+                        if col in [target, "_source_"]: continue
+                        # 0と1のみで構成されている列（ダミー列）かチェック
+                        if pd.api.types.is_numeric_dtype(df[col]):
+                            unique_vals = df[col].dropna().unique()
+                            if set(unique_vals).issubset({0, 1}):
+                                if df[col].sum() <= min_count:
+                                    df = df.drop(columns=[col])
+                                    rare_dropped += 1
+                    if rare_dropped > 0:
+                        log.append(f"📉 マイナーフラグ削除：出現回数 {int(min_count)} 以下の列を {rare_dropped}列 自動削除")
+
                 if drop_columns:
                     to_drop = [c for c in drop_columns if c in df.columns and c not in [target, "_source_"]]
                     if to_drop:
                         df = df.drop(columns=to_drop)
-                        log.append(f"列まるごと削除：{', '.join(to_drop)} を削除")
+                        log.append(f"🗑 手動削除：手動で選んだ {len(to_drop)}列 を削除")
 
                 if range_column != "(なし)":
                     numeric = pd.to_numeric(df[range_column], errors="coerce")
