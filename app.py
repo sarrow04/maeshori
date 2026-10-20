@@ -44,13 +44,22 @@ def read_file_safely(file_bytes, file_name):
             
     else:
         errors = []
-        for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
+        for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis", "euc-jp"]:
             try:
                 if hasattr(file_bytes, 'seek'):
                     file_bytes.seek(0)
                 return pd.read_csv(file_bytes, encoding=enc, low_memory=False)
             except Exception as e:
                 errors.append(f"CSV({enc}): {e}")
+                
+        # エラー無視モードで強制突破を試みる
+        for enc in ["cp932", "utf-8"]:
+            try:
+                if hasattr(file_bytes, 'seek'):
+                    file_bytes.seek(0)
+                return pd.read_csv(file_bytes, encoding=enc, errors='replace', low_memory=False)
+            except Exception:
+                pass
                 
         try:
             if hasattr(file_bytes, 'seek'):
@@ -225,29 +234,42 @@ with col_ctrl:
         st.markdown("<br>", unsafe_allow_html=True)
         st.write("---")
         st.subheader("🛠 前処理ワークフロー（STEP1 〜 4）")
-        st.write("上から順番に設定して、最後に「🚀前処理を実行する」を押してください。")
         target_col = st.selectbox("🎯 目的変数（削除や補完から除外して守る列）", ["(なし)"] + df_cols, index=df_cols.index(default_target)+1 if default_target in df_cols else 0)
 
         # ----------------------------------------------------------------
-        # 魔法のショートカット（主役）
+        # STEP1: 文字列の処理 (分割 / ダミー化)
         # ----------------------------------------------------------------
-        with st.expander("🪄 STEP1: 文字列の一括フラグ化 (0/1変換) 🌟おすすめ", expanded=True):
-            st.info("💡 「バス／トイレ／脱衣所」のような繋がった文字列を、一気に独立した「0と1の列」に変換します。文字を細かく直すより、これを使ってからSTEP4でいらない列を捨てるのが最も簡単です！")
+        with st.expander("🪄 STEP1: 複雑な文字列の処理 (分割 / ダミー化) 🌟", expanded=True):
+            st.info("💡 LightGBMなどを使うために「文字列のまま分割して残す」か、線形モデル等のために「0と1のフラグに変換する」かを選べます。")
             
-            c1, c2 = st.columns([6, 4])
-            with c1:
-                ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ (例: 設備)", ["(なし)"] + df_cols)
-            with c2:
-                ml_delim = st.text_input("区切り文字 (「／」や「空白」)", value="／")
+            tab1, tab2 = st.tabs(["✂️ 文字列のまま複数列に分割 (LightGBM向け)", "🔄 0/1のフラグ列に変換 (ダミー化)"])
             
-            ml_drop_original = st.checkbox("処理後に元の列（元データの文字列の列）を自動で削除する", value=True)
+            with tab1:
+                st.markdown("##### ✂️ 記号や空白で文字をバラバラにして列を分ける")
+                st.write("「[バス] | [トイレ] ／ 洗面所」のような文字列から、記号を無視して綺麗な文字だけを抽出し、列に分けます。")
+                c1, c2 = st.columns([5, 5])
+                with c1:
+                    split_col_step1 = st.selectbox("分割する列", ["(なし)"] + df_cols, key="split_col_step1")
+                    split_max = st.number_input("最大何列に分けるか", min_value=2, max_value=50, value=5)
+                with c2:
+                    split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)", help="このまま実行すると、[ ] や | や / などをすべて無視して文字だけを左詰めで抽出します。")
+                    split_drop_step1 = st.checkbox("処理後に元の列を削除する", value=True, key="split_drop_step1")
             
-            st.divider()
-            st.markdown("##### 🔄 通常のカテゴリダミー化 (One-Hot)")
-            onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を複数選択", df_cols, help="選択した列をすべてダミー変数化します（元の列は自動で削除されます）")
+            with tab2:
+                st.markdown("##### 🔄 複数キーワードの一括フラグ化")
+                c1, c2 = st.columns([6, 4])
+                with c1:
+                    ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + df_cols, key="ml_col")
+                with c2:
+                    ml_delim = st.text_input("区切り文字 (「／」や「空白」)", value="／", key="ml_delim")
+                ml_drop_original = st.checkbox("処理後に元の列を自動で削除する", value=True, key="ml_drop")
+                
+                st.divider()
+                st.markdown("##### 🔄 通常のカテゴリダミー化 (One-Hot)")
+                onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を複数選択", df_cols)
 
         # ----------------------------------------------------------------
-        # 基本処理
+        # STEP2: 基本処理
         # ----------------------------------------------------------------
         with st.expander("🛠 STEP2: 基本処理 (欠損値・異常値・文字の微調整)"):
             missing_action = st.radio("欠損値処理", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
@@ -257,7 +279,6 @@ with col_ctrl:
             
             st.divider()
             st.markdown("##### 📝 セル内文字の微調整 (置換・抽出)")
-            st.write("STEP1を使わずに、特定の文字だけを消したり残したりしたい場合に使います。")
             c1, c2 = st.columns(2)
             with c1:
                 replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + df_cols, key="replace_col")
@@ -267,40 +288,35 @@ with col_ctrl:
                 extract_text = st.text_input("残したい文字 (カンマ区切り可)")
 
         # ----------------------------------------------------------------
-        # その他の特徴量
+        # STEP3: その他の特徴量
         # ----------------------------------------------------------------
         with st.expander("✨ STEP3: その他の特徴量作成 (文字数・数値抽出など)"):
             c1, c2 = st.columns(2)
             with c1:
                 fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
-                split_column = st.selectbox("単純に分割する列", ["(なし)"] + df_cols)
             with c2:
                 fe_method = st.selectbox("処理方法", [
                     "何もしない", "文字数カウント", "最初の数値を抽出", 
                     "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (新築=0)", 
                     "キーワード有無フラグ", "数値のビン分割 (10分割)"
                 ])
-                split_delimiter = st.text_input("分割の区切り文字 (空白など)", value="/", key="split_delim")
             
             c3, c4 = st.columns(2)
             with c3:
                 fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)")
             with c4:
-                split_max_parts = st.number_input("最大分割数", min_value=2, max_value=20, value=3)
-            fe_keyword = st.text_input("キーワード（フラグ抽出用）")
+                fe_keyword = st.text_input("キーワード（フラグ抽出用）")
 
         # ----------------------------------------------------------------
-        # 大掃除
+        # STEP4: 大掃除
         # ----------------------------------------------------------------
         with st.expander("🗑 STEP4: 大掃除 (いらない列の削除)", expanded=True):
-            st.info("💡 STEP1でフラグ化したあとに不要になった列を、名前や出現回数でまとめて一掃できます！")
-            
             st.markdown("##### 🧹 カラム名（列の名前）を指定して一括削除")
             drop_by_name = st.text_input("列名にこの文字が含まれていたらすべて削除 (カンマ区切り可)", help="例: 脱衣所, 洗面台独立")
             
             st.divider()
             st.markdown("##### 📉 マイナーなフラグ列を自動削除")
-            min_count = st.number_input("出現件数（「1」の数）がこれ以下の列を自動削除", min_value=0, value=0, help="例: 10 と設定すると、10件以下しか該当しなかったマイナーな設備列などを一掃します。（ノイズ削減に有効です）")
+            min_count = st.number_input("出現件数がこれ以下のダミー列を自動削除", min_value=0, value=0)
 
             st.divider()
             st.markdown("##### 🗑 手動で選んで削除")
@@ -326,7 +342,40 @@ with col_ctrl:
                 log = []
                 target = target_col if target_col != "(なし)" else None
 
-                # STEP1: 一括フラグ化
+                # -------------------------
+                # STEP1: 分割 ＆ フラグ化
+                # -------------------------
+                # タブ1: 文字列のまま分割（LightGBM向け）
+                if split_col_step1 != "(なし)":
+                    prefix = f"{split_col_step1}_分割"
+                    n_parts = int(split_max)
+                    
+                    if split_delim == "自動認識 (/, |, [], 空白, 全角半角)":
+                        # 全角半角の /, |, [, ], 空白 にマッチする正規表現
+                        pat = r'[／/｜|\[\]［］\s]+'
+                    elif split_delim == "空白":
+                        pat = r'\s+'
+                    else:
+                        pat = re.escape(split_delim)
+                        
+                    # 空欄を作らず、存在する文字だけを左詰めでリスト化する魔法の関数
+                    def split_and_align(text):
+                        if pd.isna(text): return []
+                        parts = [p.strip() for p in re.split(pat, str(text)) if p.strip()]
+                        return parts
+                        
+                    split_lists = df[split_col_step1].apply(split_and_align)
+                    
+                    for i in range(n_parts):
+                        df[f"{prefix}_{i+1}"] = split_lists.apply(lambda x: x[i] if i < len(x) else np.nan)
+                        
+                    log.append(f"✂️ カラム分割：{split_col_step1} を文字列のまま {n_parts} 列に左詰めで分割")
+                    
+                    if split_drop_step1 and split_col_step1 in df.columns:
+                        df = df.drop(columns=[split_col_step1])
+                        log.append(f"✂️ カラム分割：元の '{split_col_step1}' 列を削除しました")
+
+                # タブ2: フラグ化
                 if ml_column != "(なし)":
                     delim = ml_delim if ml_delim else "/"
                     temp_series = df[ml_column].fillna("").astype(str)
@@ -341,7 +390,6 @@ with col_ctrl:
                         actual_delim = delim
                         
                     dummies = temp_series.str.get_dummies(sep=actual_delim).astype(int)
-                    
                     if "" in dummies.columns:
                         dummies = dummies.drop(columns=[""])
                     if "nan" in dummies.columns:
@@ -350,17 +398,19 @@ with col_ctrl:
                     prefix = ml_column
                     dummies.columns = [f"{prefix}_{c}" for c in dummies.columns]
                     df = pd.concat([df, dummies], axis=1)
-                    log.append(f"🪄 STEP1一括フラグ化：{ml_column} を {len(dummies.columns)}列のダミー変数に変換")
+                    log.append(f"🪄 一括フラグ化：{ml_column} を {len(dummies.columns)}列のダミー変数に変換")
                     
                     if ml_drop_original and ml_column in df.columns:
                         df = df.drop(columns=[ml_column])
-                        log.append(f"🪄 STEP1一括フラグ化：元の '{ml_column}' 列を自動削除しました")
 
                 if onehot_columns:
                     df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
-                    log.append(f"一括ダミー化：{', '.join(onehot_columns)} をOne-Hot変換")
+                    log.append(f"🔄 One-Hot変換：{', '.join(onehot_columns)} を変換")
 
+
+                # -------------------------
                 # STEP2: 基本処理
+                # -------------------------
                 if clean_text:
                     text_cols = [c for c in df.select_dtypes(include=["object", "string"]).columns if c != "_source_"]
                     for col in text_cols:
@@ -422,7 +472,9 @@ with col_ctrl:
                     df[extract_column] = df[extract_column].apply(extract_match)
                     log.append(f"文字抽出：{extract_column} に '{', '.join(extract_words)}' のみを残す")
 
+                # -------------------------
                 # STEP3: その他の特徴量
+                # -------------------------
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
@@ -464,26 +516,9 @@ with col_ctrl:
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
                         log.append(f"特徴量追加：{fe_column} をビン分割")
 
-                if split_column != "(なし)" and split_delimiter:
-                    prefix = f"{split_column}_分割"
-                    n_parts = int(split_max_parts)
-                    temp_series = df[split_column].fillna("").astype(str)
-                    
-                    if split_delimiter == "空白":
-                        split_values = temp_series.str.split(n=n_parts - 1, expand=True)
-                    else:
-                        if split_delimiter == "/":
-                            temp_series = temp_series.str.replace("／", "/")
-                        split_values = temp_series.str.split(split_delimiter, n=n_parts - 1, expand=True)
-                        
-                    for i in range(n_parts):
-                        if i < split_values.shape[1]:
-                            df[f"{prefix}_{i+1}"] = split_values.iloc[:, i].str.strip().replace("", np.nan)
-                        else:
-                            df[f"{prefix}_{i+1}"] = np.nan
-                    log.append(f"カラム分割：{split_column} を最大 {n_parts} 分割展開")
-
+                # -------------------------
                 # STEP4: 大掃除
+                # -------------------------
                 if drop_by_name.strip():
                     drop_words = [w.strip() for w in drop_by_name.split(",") if w.strip()]
                     to_drop_by_name = []
