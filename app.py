@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.subplots as plt  # ダミーでインポートエラーを防ぐため削除済み
 import matplotlib.pyplot as plt
 import re
 import io
@@ -299,7 +298,7 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法", [
                     "何もしない", "文字数カウント", "最初の数値を抽出", 
                     "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (単一の数値に変換)", 
-                    "「〇年〇ヶ月」を年と月に別々の列に分割", # ★今回追加した機能
+                    "「〇年〇ヶ月」を年と月に別々の列に分割",
                     "キーワード有無フラグ", "数値のビン分割 (10分割)"
                 ])
             
@@ -347,7 +346,6 @@ with col_ctrl:
                 # -------------------------
                 # STEP1: 分割 ＆ フラグ化
                 # -------------------------
-                # タブ1: 文字列のまま分割（LightGBM向け）
                 if split_col_step1 != "(なし)":
                     prefix = f"{split_col_step1}_分割"
                     n_parts = int(split_max)
@@ -375,7 +373,6 @@ with col_ctrl:
                         df = df.drop(columns=[split_col_step1])
                         log.append(f"✂️ カラム分割：元の '{split_col_step1}' 列を削除しました")
 
-                # タブ2: フラグ化
                 if ml_column != "(なし)":
                     delim = ml_delim if ml_delim else "/"
                     temp_series = df[ml_column].fillna("").astype(str)
@@ -510,7 +507,6 @@ with col_ctrl:
                         df[f"{prefix}_築年数"] = source.apply(get_building_age)
                         log.append(f"特徴量追加：{fe_column} から築年数抽出(小数点変換)")
                         
-                    # ★今回追加した年と月の分離抽出機能
                     elif fe_method == "「〇年〇ヶ月」を年と月に別々の列に分割":
                         def extract_year(text):
                             if pd.isna(text): return np.nan
