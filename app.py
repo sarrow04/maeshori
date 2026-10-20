@@ -11,7 +11,7 @@ st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 # -----------------------------
 # 共通処理
 # -----------------------------
-TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice"]
+TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice", "y", "sales"]
 
 def fix_dataframe_for_streamlit(df):
     """StreamlitのWebsocket/PyArrowクラッシュを防ぐための自己修復処理"""
@@ -119,15 +119,15 @@ def make_histogram(df, column):
     fig.tight_layout()
     return fig
 
-def convert_df(df, format_type):
+def convert_df(df, format_type, header=True):
     if format_type == "Parquet形式 (.parquet)":
         buffer = io.BytesIO()
         df.to_parquet(buffer, index=False)
         return buffer.getvalue(), "parquet", "application/octet-stream"
     elif format_type == "GZIP圧縮CSV (.csv.gz)":
-        return df.to_csv(index=False, encoding="utf-8-sig", compression="gzip").encode("utf-8"), "csv.gz", "application/gzip"
+        return df.to_csv(index=False, encoding="utf-8-sig", compression="gzip", header=header).encode("utf-8"), "csv.gz", "application/gzip"
     else:
-        return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8"), "csv", "text/csv"
+        return df.to_csv(index=False, encoding="utf-8-sig", header=header).encode("utf-8"), "csv", "text/csv"
 
 # -----------------------------
 # メインUI構築
@@ -249,12 +249,12 @@ with col_ctrl:
                 c1, c2 = st.columns([5, 5])
                 with c1:
                     split_col_step1 = st.selectbox("分割する列", ["(なし)"] + df_cols, key="split_col_step1")
-                    split_strategy = st.radio("分割の方式", ["単語ごとに専用列を作成 (ズレ完全防止・推奨)", "左詰めで分割 (最大N列指定)"], help="「専用列を作成」を選ぶと、設備ごとの列が作られ、持っていればその文字、持っていなければ空欄になります。列のズレが100%防げます。")
+                    split_strategy = st.radio("分割の方式", ["単語ごとに専用列を作成 (ズレ完全防止・推奨)", "左詰めで分割 (最大N列指定)"])
                     if split_strategy == "左詰めで分割 (最大N列指定)":
                         split_max = st.number_input("最大何列に分けるか", min_value=2, max_value=50, value=5)
                         split_sort_mode = st.selectbox("行内の単語のソート方法", ["五十音・アルファベット順", "全体の出現頻度順", "ソートしない"])
                 with c2:
-                    split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)", help="このまま実行すると、[ ] や | や / などをすべて無視して文字だけを抽出します。")
+                    split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)")
                     split_drop_step1 = st.checkbox("処理後に元の列を削除する", value=True, key="split_drop_step1")
             
             with tab2:
@@ -292,13 +292,16 @@ with col_ctrl:
         # ----------------------------------------------------------------
         # STEP3: その他の特徴量
         # ----------------------------------------------------------------
-        with st.expander("✨ STEP3: その他の特徴量作成 (文字数・数値抽出など)"):
+        with st.expander("✨ STEP3: その他の特徴量作成 (時系列・文字数など)"):
             c1, c2 = st.columns(2)
             with c1:
                 fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
             with c2:
                 fe_method = st.selectbox("処理方法", [
-                    "何もしない", "文字数カウント", "最初の数値を抽出", 
+                    "何もしない", 
+                    "日付列から年・月・日・曜日を抽出",  
+                    "日付のフォーマット変換", # ★今回変更：選択式にしました
+                    "文字数カウント", "最初の数値を抽出", 
                     "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (単一の数値に変換)", 
                     "「〇年〇ヶ月」を年と月に別々の列に分割",
                     "キーワード有無フラグ", "数値のビン分割 (10分割)"
@@ -309,6 +312,17 @@ with col_ctrl:
                 fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)")
             with c4:
                 fe_keyword = st.text_input("キーワード（フラグ抽出用）")
+                
+            # ★今回追加：フォーマット変換が選ばれたときだけ詳細メニューを表示
+            date_format = None
+            if fe_method == "日付のフォーマット変換":
+                date_format = st.selectbox("変換後のフォーマットを選択", [
+                    "yyyy-m-d (例: 2014-1-5) ※ゼロ埋めなし",
+                    "yyyy-MM-dd (例: 2014-01-05)",
+                    "yyyy/m/d (例: 2014/1/5)",
+                    "yyyy/MM/dd (例: 2014/01/05)",
+                    "yyyyMMdd (例: 20140105)"
+                ])
 
         # ----------------------------------------------------------------
         # STEP4: 大掃除
@@ -348,7 +362,6 @@ with col_ctrl:
                 # -------------------------
                 # STEP1: 分割 ＆ フラグ化
                 # -------------------------
-                # タブ1: 文字列のまま分割（LightGBM向け）
                 if split_col_step1 != "(なし)":
                     prefix = f"{split_col_step1}_分割"
                     temp_series = df[split_col_step1].fillna("").astype(str)
@@ -363,7 +376,6 @@ with col_ctrl:
                         actual_delim = split_delim
 
                     if split_strategy == "単語ごとに専用列を作成 (ズレ完全防止・推奨)":
-                        # ダミー化と同じ仕組みを使って一意な要素を取得し、1/0の代わりに文字/NaNを入れる
                         dummies = temp_series.str.get_dummies(sep=actual_delim)
                         if "" in dummies.columns:
                             dummies = dummies.drop(columns=[""])
@@ -375,7 +387,6 @@ with col_ctrl:
                         log.append(f"✂️ カラム分割：{split_col_step1} を単語ごとの専用列（{len(dummies.columns)}列）に分割し、ズレを完全に解消しました")
                     
                     else:
-                        # 左詰めで分割
                         n_parts = int(split_max)
                         def split_and_align(text):
                             if pd.isna(text) or text == "": return []
@@ -404,9 +415,7 @@ with col_ctrl:
                     
                     if split_drop_step1 and split_col_step1 in df.columns:
                         df = df.drop(columns=[split_col_step1])
-                        log.append(f"✂️ カラム分割：元の '{split_col_step1}' 列を削除しました")
 
-                # タブ2: フラグ化
                 if ml_column != "(なし)":
                     delim = ml_delim if ml_delim else "/"
                     temp_series = df[ml_column].fillna("").astype(str)
@@ -509,7 +518,34 @@ with col_ctrl:
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
                     
-                    if fe_method == "文字数カウント":
+                    if fe_method == "日付列から年・月・日・曜日を抽出":
+                        dt_series = pd.to_datetime(source, errors="coerce")
+                        df[f"{prefix}_年"] = dt_series.dt.year
+                        df[f"{prefix}_月"] = dt_series.dt.month
+                        df[f"{prefix}_日"] = dt_series.dt.day
+                        df[f"{prefix}_曜日"] = dt_series.dt.dayofweek
+                        log.append(f"特徴量追加：{fe_column} から「年」「月」「日」「曜日」をそれぞれ抽出")
+                        
+                    elif fe_method == "日付のフォーマット変換":
+                        dt_series = pd.to_datetime(source, errors="coerce")
+                        def format_date(x, fmt):
+                            if pd.isna(x): return np.nan
+                            if "yyyy-m-d" in fmt:
+                                return f"{x.year}-{x.month}-{x.day}"
+                            elif "yyyy-MM-dd" in fmt:
+                                return x.strftime("%Y-%m-%d")
+                            elif "yyyy/m/d" in fmt:
+                                return f"{x.year}/{x.month}/{x.day}"
+                            elif "yyyy/MM/dd" in fmt:
+                                return x.strftime("%Y/%m/%d")
+                            elif "yyyyMMdd" in fmt:
+                                return x.strftime("%Y%m%d")
+                            return np.nan
+                            
+                        df[f"{prefix}_フォーマット済"] = dt_series.apply(lambda x: format_date(x, date_format))
+                        log.append(f"フォーマット変換：{fe_column} を「{date_format.split(' ')[0]}」形式に変換")
+
+                    elif fe_method == "文字数カウント":
                         df[f"{prefix}_文字数"] = source.astype(str).str.len()
                         log.append(f"特徴量追加：{fe_column} の文字数")
                         
@@ -661,14 +697,18 @@ with col_view:
             st.markdown("### 📥 データのダウンロード")
             save_format = st.radio("「**保存形式を選択**」", ["通常のCSV (.csv)", "GZIP圧縮CSV (.csv.gz)", "Parquet形式 (.parquet)"], horizontal=True)
             
+            # 【新規追加】コンペティションの提出用ファイルのヘッダーなし対応
+            no_header = st.checkbox("CSVのヘッダー（列名）を含めずにダウンロードする（※コンペの応募ファイル用）", value=False)
+            export_header = not no_header
+            
             source_vals = target_df.get("_source_", pd.Series()).unique()
             
             if "train" in source_vals and "test" in source_vals:
                 train_out = target_df[target_df["_source_"] == "train"].drop(columns=["_source_"], errors="ignore")
                 test_out = target_df[target_df["_source_"] == "test"].drop(columns=["_source_"], errors="ignore")
                 
-                train_data, ext, mime = convert_df(train_out, save_format)
-                test_data, _, _ = convert_df(test_out, save_format)
+                train_data, ext, mime = convert_df(train_out, save_format, header=export_header)
+                test_data, _, _ = convert_df(test_out, save_format, header=export_header)
                 
                 total_new_size = len(train_data) + len(test_data)
                 reduction = (1 - total_new_size / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
@@ -687,7 +727,7 @@ with col_view:
                         zip_file.writestr(f"preprocessed_test.{ext}", test_data)
                     st.download_button("ZIPでまとめてDL", zip_buffer.getvalue(), "preprocessed_data.zip", "application/zip", type="primary", use_container_width=True)
             else:
-                out_data, ext, mime = convert_df(target_df.drop(columns=["_source_"], errors="ignore"), save_format)
+                out_data, ext, mime = convert_df(target_df.drop(columns=["_source_"], errors="ignore"), save_format, header=export_header)
                 reduction = (1 - len(out_data) / st.session_state.original_size) * 100 if st.session_state.original_size > 0 else 0
                 
                 st.write(f"処理後サイズ: {len(out_data) / (1024*1024):.2f} MB (削減率: {reduction:.1f}%)")
