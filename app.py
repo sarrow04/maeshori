@@ -290,39 +290,64 @@ with col_ctrl:
                 extract_text = st.text_input("残したい文字 (カンマ区切り可)")
 
         # ----------------------------------------------------------------
-        # STEP3: その他の特徴量
+        # STEP3: その他の特徴量作成 (大幅拡充)
         # ----------------------------------------------------------------
-        with st.expander("✨ STEP3: その他の特徴量作成 (時系列・文字数など)"):
-            c1, c2 = st.columns(2)
+        with st.expander("✨ STEP3: その他の特徴量作成 (時系列・数値・集約など)", expanded=True):
+            c1, c2 = st.columns([4, 6])
             with c1:
-                fe_column = st.selectbox("元になる列", ["(なし)"] + df_cols)
+                fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + df_cols)
             with c2:
-                fe_method = st.selectbox("処理方法", [
+                fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
-                    "日付列から年・月・日・曜日を抽出",  
-                    "日付のフォーマット変換", # ★今回変更：選択式にしました
-                    "文字数カウント", "最初の数値を抽出", 
-                    "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (単一の数値に変換)", 
-                    "「〇年〇ヶ月」を年と月に別々の列に分割",
-                    "キーワード有無フラグ", "数値のビン分割 (10分割)"
+                    "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)",
+                    "【数値計算】2つの列で四則演算 (+, -, *, /)",
+                    "【数値計算】対数変換 (Log1p - 歪み補正)",
+                    "【変換】数値のビン分割 (10分割)",
+                    "【時系列】日付列から年・月・日・曜日を抽出",  
+                    "【時系列】日付のフォーマット変換", 
+                    "【抽出】「徒歩〇分」から最短分数を抽出", 
+                    "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)", 
+                    "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
+                    "【抽出】最初の数値を抽出", 
+                    "【テキスト】文字数カウント", 
+                    "【フラグ】キーワード有無フラグ"
                 ])
             
-            c3, c4 = st.columns(2)
+            c3, c4 = st.columns([4, 6])
             with c3:
-                fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)")
-            with c4:
-                fe_keyword = st.text_input("キーワード（フラグ抽出用）")
+                fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)", placeholder="例: feat")
                 
-            # ★今回追加：フォーマット変換が選ばれたときだけ詳細メニューを表示
-            date_format = None
-            if fe_method == "日付のフォーマット変換":
-                date_format = st.selectbox("変換後のフォーマットを選択", [
-                    "yyyy-m-d (例: 2014-1-5) ※ゼロ埋めなし",
-                    "yyyy-MM-dd (例: 2014-01-05)",
-                    "yyyy/m/d (例: 2014/1/5)",
-                    "yyyy/MM/dd (例: 2014/01/05)",
-                    "yyyyMMdd (例: 20140105)"
-                ])
+            with c4:
+                # 処理方法に応じて動的にUIを表示
+                date_format = None
+                fe_keyword = ""
+                fe_col2 = None
+                fe_op = "+"
+                fe_num_col = None
+                fe_agg = "mean (平均)"
+
+                if fe_method == "【時系列】日付のフォーマット変換":
+                    date_format = st.selectbox("変換後のフォーマット", [
+                        "yyyy-m-d (例: 2014-1-5) ※ゼロ埋めなし",
+                        "yyyy-MM-dd (例: 2014-01-05)",
+                        "yyyy/m/d (例: 2014/1/5)",
+                        "yyyy/MM/dd (例: 2014/01/05)",
+                        "yyyyMMdd (例: 20140105)"
+                    ])
+                elif fe_method == "【フラグ】キーワード有無フラグ":
+                    fe_keyword = st.text_input("キーワード（フラグ抽出用）")
+                elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
+                    col4_1, col4_2 = st.columns([3, 7])
+                    with col4_1:
+                        fe_op = st.radio("計算記号", ["+", "-", "×", "÷"], horizontal=True)
+                    with col4_2:
+                        fe_col2 = st.selectbox("計算する2つ目の列", df_cols)
+                elif fe_method == "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)":
+                    col4_1, col4_2 = st.columns(2)
+                    with col4_1:
+                        fe_num_col = st.selectbox("集計する数値列 (例: 売上)", ["(なし)"] + get_numeric_columns(st.session_state.df))
+                    with col4_2:
+                        fe_agg = st.selectbox("集計方法", ["mean (平均)", "sum (合計)", "max (最大)", "min (最小)", "count (件数)"])
 
         # ----------------------------------------------------------------
         # STEP4: 大掃除
@@ -512,13 +537,13 @@ with col_ctrl:
                     log.append(f"文字抽出：{extract_column} に '{', '.join(extract_words)}' のみを残す")
 
                 # -------------------------
-                # STEP3: その他の特徴量
+                # STEP3: その他の特徴量作成
                 # -------------------------
                 if fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
                     
-                    if fe_method == "日付列から年・月・日・曜日を抽出":
+                    if fe_method == "【時系列】日付列から年・月・日・曜日を抽出":
                         dt_series = pd.to_datetime(source, errors="coerce")
                         df[f"{prefix}_年"] = dt_series.dt.year
                         df[f"{prefix}_月"] = dt_series.dt.month
@@ -526,7 +551,7 @@ with col_ctrl:
                         df[f"{prefix}_曜日"] = dt_series.dt.dayofweek
                         log.append(f"特徴量追加：{fe_column} から「年」「月」「日」「曜日」をそれぞれ抽出")
                         
-                    elif fe_method == "日付のフォーマット変換":
+                    elif fe_method == "【時系列】日付のフォーマット変換":
                         dt_series = pd.to_datetime(source, errors="coerce")
                         def format_date(x, fmt):
                             if pd.isna(x): return np.nan
@@ -545,16 +570,48 @@ with col_ctrl:
                         df[f"{prefix}_フォーマット済"] = dt_series.apply(lambda x: format_date(x, date_format))
                         log.append(f"フォーマット変換：{fe_column} を「{date_format.split(' ')[0]}」形式に変換")
 
-                    elif fe_method == "文字数カウント":
+                    elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
+                        if fe_col2 and fe_col2 != "(なし)":
+                            s1 = pd.to_numeric(df[fe_column], errors="coerce")
+                            s2 = pd.to_numeric(df[fe_col2], errors="coerce")
+                            op_name = {"+": "和", "-": "差", "×": "積", "÷": "商"}[fe_op]
+                            if fe_op == "+": res = s1 + s2
+                            elif fe_op == "-": res = s1 - s2
+                            elif fe_op == "×": res = s1 * s2
+                            elif fe_op == "÷": res = np.where(s2 == 0, np.nan, s1 / s2)
+                            df[f"{prefix}_{op_name}_{fe_col2}"] = res
+                            log.append(f"特徴量追加：{fe_column} と {fe_col2} の四則演算({fe_op})")
+
+                    elif fe_method == "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)":
+                        if fe_num_col and fe_num_col != "(なし)":
+                            agg_func = fe_agg.split(" ")[0]
+                            num_series = pd.to_numeric(df[fe_num_col], errors="coerce")
+                            
+                            # Trainデータの情報だけでMapを作る（データリーク防止）
+                            temp_df = pd.DataFrame({"cat": df[fe_column], "num": num_series, "src": df.get("_source_", "single")})
+                            if "train" in temp_df["src"].values:
+                                agg_map = temp_df[temp_df["src"] == "train"].groupby("cat")["num"].agg(agg_func)
+                            else:
+                                agg_map = temp_df.groupby("cat")["num"].agg(agg_func)
+                                
+                            df[f"{prefix}_{fe_num_col}_{agg_func}"] = df[fe_column].map(agg_map)
+                            log.append(f"特徴量追加：{fe_column} ごとの {fe_num_col} の {fe_agg} を算出")
+
+                    elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
+                        num_s = pd.to_numeric(source, errors="coerce")
+                        df[f"{prefix}_log1p"] = np.log1p(np.clip(num_s, 0, None))
+                        log.append(f"特徴量追加：{fe_column} を対数変換(Log1p)")
+
+                    elif fe_method == "【テキスト】文字数カウント":
                         df[f"{prefix}_文字数"] = source.astype(str).str.len()
                         log.append(f"特徴量追加：{fe_column} の文字数")
                         
-                    elif fe_method == "最初の数値を抽出":
+                    elif fe_method == "【抽出】最初の数値を抽出":
                         extracted = source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
                         df[f"{prefix}_数値"] = pd.to_numeric(extracted, errors="coerce")
                         log.append(f"特徴量追加：{fe_column} から数値抽出")
                         
-                    elif fe_method == "「徒歩〇分」から最短分数を抽出":
+                    elif fe_method == "【抽出】「徒歩〇分」から最短分数を抽出":
                         def get_min_walk(text):
                             if pd.isna(text): return np.nan
                             matches = re.findall(r"徒歩\s*(\d+)\s*分?", str(text))
@@ -563,7 +620,7 @@ with col_ctrl:
                         df[f"{prefix}_最短徒歩分"] = source.apply(get_min_walk)
                         log.append(f"特徴量追加：{fe_column} から徒歩最短分数")
                         
-                    elif fe_method == "「築〇年」から年数を抽出 (単一の数値に変換)":
+                    elif fe_method == "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)":
                         def get_building_age(text):
                             if pd.isna(text): return np.nan
                             s = str(text)
@@ -577,7 +634,7 @@ with col_ctrl:
                         df[f"{prefix}_築年数"] = source.apply(get_building_age)
                         log.append(f"特徴量追加：{fe_column} から築年数抽出(小数点変換)")
                         
-                    elif fe_method == "「〇年〇ヶ月」を年と月に別々の列に分割":
+                    elif fe_method == "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割":
                         def extract_year(text):
                             if pd.isna(text): return np.nan
                             s = str(text)
@@ -600,12 +657,12 @@ with col_ctrl:
                         df[f"{prefix}_ヶ月"] = source.apply(extract_month)
                         log.append(f"特徴量追加：{fe_column} を「年」と「ヶ月」の2列に分割")
 
-                    elif fe_method == "キーワード有無フラグ":
+                    elif fe_method == "【フラグ】キーワード有無フラグ":
                         if fe_keyword.strip():
                             df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
                             log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
                             
-                    elif fe_method == "数値のビン分割 (10分割)":
+                    elif fe_method == "【変換】数値のビン分割 (10分割)":
                         num_series = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
                         log.append(f"特徴量追加：{fe_column} をビン分割")
@@ -697,7 +754,6 @@ with col_view:
             st.markdown("### 📥 データのダウンロード")
             save_format = st.radio("「**保存形式を選択**」", ["通常のCSV (.csv)", "GZIP圧縮CSV (.csv.gz)", "Parquet形式 (.parquet)"], horizontal=True)
             
-            # 【新規追加】コンペティションの提出用ファイルのヘッダーなし対応
             no_header = st.checkbox("CSVのヘッダー（列名）を含めずにダウンロードする（※コンペの応募ファイル用）", value=False)
             export_header = not no_header
             
