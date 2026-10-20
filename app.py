@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.subplots as plt  # ダミーでインポートエラーを防ぐため削除済み
 import matplotlib.pyplot as plt
 import re
 import io
@@ -297,7 +298,8 @@ with col_ctrl:
             with c2:
                 fe_method = st.selectbox("処理方法", [
                     "何もしない", "文字数カウント", "最初の数値を抽出", 
-                    "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (新築=0)", 
+                    "「徒歩〇分」から最短分数を抽出", "「築〇年」から年数を抽出 (単一の数値に変換)", 
+                    "「〇年〇ヶ月」を年と月に別々の列に分割", # ★今回追加した機能
                     "キーワード有無フラグ", "数値のビン分割 (10分割)"
                 ])
             
@@ -351,14 +353,12 @@ with col_ctrl:
                     n_parts = int(split_max)
                     
                     if split_delim == "自動認識 (/, |, [], 空白, 全角半角)":
-                        # 全角半角の /, |, [, ], 空白 にマッチする正規表現
                         pat = r'[／/｜|\[\]［］\s]+'
                     elif split_delim == "空白":
                         pat = r'\s+'
                     else:
                         pat = re.escape(split_delim)
                         
-                    # 空欄を作らず、存在する文字だけを左詰めでリスト化する魔法の関数
                     def split_and_align(text):
                         if pd.isna(text): return []
                         parts = [p.strip() for p in re.split(pat, str(text)) if p.strip()]
@@ -406,7 +406,6 @@ with col_ctrl:
                 if onehot_columns:
                     df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
                     log.append(f"🔄 One-Hot変換：{', '.join(onehot_columns)} を変換")
-
 
                 # -------------------------
                 # STEP2: 基本処理
@@ -482,10 +481,12 @@ with col_ctrl:
                     if fe_method == "文字数カウント":
                         df[f"{prefix}_文字数"] = source.astype(str).str.len()
                         log.append(f"特徴量追加：{fe_column} の文字数")
+                        
                     elif fe_method == "最初の数値を抽出":
                         extracted = source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0]
                         df[f"{prefix}_数値"] = pd.to_numeric(extracted, errors="coerce")
                         log.append(f"特徴量追加：{fe_column} から数値抽出")
+                        
                     elif fe_method == "「徒歩〇分」から最短分数を抽出":
                         def get_min_walk(text):
                             if pd.isna(text): return np.nan
@@ -494,23 +495,50 @@ with col_ctrl:
                             return np.nan
                         df[f"{prefix}_最短徒歩分"] = source.apply(get_min_walk)
                         log.append(f"特徴量追加：{fe_column} から徒歩最短分数")
-                    elif fe_method == "「築〇年」から年数を抽出 (新築=0)":
+                        
+                    elif fe_method == "「築〇年」から年数を抽出 (単一の数値に変換)":
                         def get_building_age(text):
                             if pd.isna(text): return np.nan
                             s = str(text)
                             if "新築" in s: return 0.0
                             y_match = re.search(r"(\d+)\s*年", s)
-                            m_match = re.search(r"(\d+)\s*ヶ月", s)
+                            m_match = re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", s)
                             y = int(y_match.group(1)) if y_match else 0
                             m = int(m_match.group(1)) if m_match else 0
                             if not y_match and not m_match: return np.nan
                             return y + (m / 12.0)
                         df[f"{prefix}_築年数"] = source.apply(get_building_age)
-                        log.append(f"特徴量追加：{fe_column} から築年数抽出")
+                        log.append(f"特徴量追加：{fe_column} から築年数抽出(小数点変換)")
+                        
+                    # ★今回追加した年と月の分離抽出機能
+                    elif fe_method == "「〇年〇ヶ月」を年と月に別々の列に分割":
+                        def extract_year(text):
+                            if pd.isna(text): return np.nan
+                            s = str(text)
+                            if "新築" in s: return 0.0
+                            match = re.search(r"(\d+)\s*年", s)
+                            if match: return float(match.group(1))
+                            if re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", s): return 0.0
+                            return np.nan
+
+                        def extract_month(text):
+                            if pd.isna(text): return np.nan
+                            s = str(text)
+                            if "新築" in s: return 0.0
+                            match = re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", s)
+                            if match: return float(match.group(1))
+                            if re.search(r"(\d+)\s*年", s): return 0.0
+                            return np.nan
+
+                        df[f"{prefix}_年"] = source.apply(extract_year)
+                        df[f"{prefix}_ヶ月"] = source.apply(extract_month)
+                        log.append(f"特徴量追加：{fe_column} を「年」と「ヶ月」の2列に分割")
+
                     elif fe_method == "キーワード有無フラグ":
                         if fe_keyword.strip():
                             df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
                             log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
+                            
                     elif fe_method == "数値のビン分割 (10分割)":
                         num_series = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_series, q=10, labels=False, duplicates='drop')
