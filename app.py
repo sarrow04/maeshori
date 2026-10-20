@@ -290,7 +290,7 @@ with col_ctrl:
                 extract_text = st.text_input("残したい文字 (カンマ区切り可)")
 
         # ----------------------------------------------------------------
-        # STEP3: その他の特徴量作成 (大幅拡充)
+        # STEP3: その他の特徴量作成
         # ----------------------------------------------------------------
         with st.expander("✨ STEP3: その他の特徴量作成 (時系列・数値・集約など)", expanded=True):
             c1, c2 = st.columns([4, 6])
@@ -299,6 +299,8 @@ with col_ctrl:
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
+                    "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
+                    "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)", # ★今回変更した機能
                     "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
@@ -318,13 +320,14 @@ with col_ctrl:
                 fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)", placeholder="例: feat")
                 
             with c4:
-                # 処理方法に応じて動的にUIを表示
                 date_format = None
                 fe_keyword = ""
                 fe_col2 = None
                 fe_op = "+"
                 fe_num_col = None
                 fe_agg = "mean (平均)"
+                fe_group_width = 10
+                fe_group_suffix = "代"
 
                 if fe_method == "【時系列】日付のフォーマット変換":
                     date_format = st.selectbox("変換後のフォーマット", [
@@ -334,6 +337,12 @@ with col_ctrl:
                         "yyyy/MM/dd (例: 2014/01/05)",
                         "yyyyMMdd (例: 20140105)"
                     ])
+                elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
+                    col4_1, col4_2 = st.columns(2)
+                    with col4_1:
+                        fe_group_width = st.number_input("区切り幅 (例: 10, 5, 100)", min_value=1, value=10)
+                    with col4_2:
+                        fe_group_suffix = st.text_input("後ろにつける文字 (例: 代, 度台, 円台)", value="代")
                 elif fe_method == "【フラグ】キーワード有無フラグ":
                     fe_keyword = st.text_input("キーワード（フラグ抽出用）")
                 elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
@@ -543,7 +552,24 @@ with col_ctrl:
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
                     
-                    if fe_method == "【時系列】日付列から年・月・日・曜日を抽出":
+                    if fe_method == "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)":
+                        codes, uniques = pd.factorize(source)
+                        df[f"{prefix}_ID"] = np.where(pd.isna(source), np.nan, codes)
+                        log.append(f"特徴量追加：{fe_column} を数値ID（Label Encoding）に変換")
+
+                    elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
+                        def to_group(val):
+                            try:
+                                num = float(val)
+                                if pd.isna(num): return np.nan
+                                # マイナス気温なども考慮し、指定幅ごとに床関数で丸める
+                                return f"{int(np.floor(num / fe_group_width) * fe_group_width)}{fe_group_suffix}"
+                            except Exception:
+                                return np.nan
+                        df[f"{prefix}_{fe_group_width}区切り"] = source.apply(to_group)
+                        log.append(f"特徴量追加：{fe_column} を {fe_group_width} 刻みのカテゴリに変換")
+
+                    elif fe_method == "【時系列】日付列から年・月・日・曜日を抽出":
                         dt_series = pd.to_datetime(source, errors="coerce")
                         df[f"{prefix}_年"] = dt_series.dt.year
                         df[f"{prefix}_月"] = dt_series.dt.month
@@ -587,7 +613,6 @@ with col_ctrl:
                             agg_func = fe_agg.split(" ")[0]
                             num_series = pd.to_numeric(df[fe_num_col], errors="coerce")
                             
-                            # Trainデータの情報だけでMapを作る（データリーク防止）
                             temp_df = pd.DataFrame({"cat": df[fe_column], "num": num_series, "src": df.get("_source_", "single")})
                             if "train" in temp_df["src"].values:
                                 agg_map = temp_df[temp_df["src"] == "train"].groupby("cat")["num"].agg(agg_func)
