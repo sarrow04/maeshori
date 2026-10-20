@@ -246,11 +246,14 @@ with col_ctrl:
             
             with tab1:
                 st.markdown("##### ✂️ 記号や空白で文字をバラバラにして列を分ける")
-                st.write("「[バス] | [トイレ] ／ 洗面所」のような文字列から、記号を無視して綺麗な文字だけを抽出し、列に分けます。")
+                st.write("「[バス] | [トイレ] ／ 洗面所」のような文字列から、記号を無視して綺麗な文字だけを抽出。ソート順に従って各行の各列へ左詰めで格納し、カテゴリーの位置（行同士のズレ）を解消します。")
                 c1, c2 = st.columns([5, 5])
                 with c1:
                     split_col_step1 = st.selectbox("分割する列", ["(なし)"] + df_cols, key="split_col_step1")
                     split_max = st.number_input("最大何列に分けるか", min_value=2, max_value=50, value=5)
+                    
+                    # 💡 【行単位の「まとめ直し」のための新機能】
+                    split_sort_mode = st.selectbox("行内の単語を並び替える基準（ソート方法）", ["五十音・アルファベット順", "全体の出現頻度順（多い順）", "ソートしない"], index=0, help="「五十音順」や「頻度順」に各行の単語を揃えることで、『分割_1』には必ず優先度の高い単語が入り、行ごとの並びの不揃いを解消してまとめ直します。")
                 with c2:
                     split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)", help="このまま実行すると、[ ] や | や / などをすべて無視して文字だけを左詰めで抽出します。")
                     split_drop_step1 = st.checkbox("処理後に元の列を削除する", value=True, key="split_drop_step1")
@@ -364,6 +367,37 @@ with col_ctrl:
                         
                     split_lists = df[split_col_step1].apply(split_and_align)
                     
+                    # ------------------------------------------------------
+                    # 💡 行単位の「あいうえお順にまとめ直す」ロジックを追加
+                    # ------------------------------------------------------
+                    if split_sort_mode != "ソートしない":
+                        all_words = []
+                        for lst in split_lists:
+                            all_words.extend(lst)
+                        
+                        word_series = pd.Series(all_words)
+                        if split_sort_mode == "五十音・アルファベット順":
+                            # 一意の単語をリストにして昇順ソート
+                            sorted_unique = sorted(list(word_series.unique()))
+                            # 各行のパーツを、この五十音ソート順の位置に基づいて並び替え
+                            order_map = {w: i for i, w in enumerate(sorted_unique)}
+                            def apply_sort(parts):
+                                # 各行の重複を取り除き、五十音順に並べ替える
+                                return sorted(list(set(parts)), key=lambda x: order_map.get(x, 999999))
+                            split_lists = split_lists.apply(apply_sort)
+                            
+                        elif split_sort_mode == "全体の出現頻度順（多い順）":
+                            freq_ranks = word_series.value_counts()
+                            order_map = {w: i for i, (w, _) in enumerate(freq_ranks.items())}
+                            def apply_sort_freq(parts):
+                                return sorted(list(set(parts)), key=lambda x: order_map.get(x, 999999))
+                            split_lists = split_lists.apply(apply_sort_freq)
+                        
+                        log.append(f"✂️ カテゴリ並べ替え：各行内のパーツを『{split_sort_mode}』で並び替えて『分割_1』からのズレを解消しました。")
+                    else:
+                        log.append(f"✂️ カテゴリ並べ替え：並び替えを行わずに出現順のまま分割します。")
+                    # ------------------------------------------------------
+
                     for i in range(n_parts):
                         df[f"{prefix}_{i+1}"] = split_lists.apply(lambda x: x[i] if i < len(x) else np.nan)
                         
