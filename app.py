@@ -11,7 +11,7 @@ st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 # -----------------------------
 # 共通処理
 # -----------------------------
-TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice", "y", "sales"]
+TARGET_CANDIDATES = ["賃料", "目的変数", "target", "TARGET", "price", "SalePrice", "y", "sales", "kcal"]
 
 def fix_dataframe_for_streamlit(df):
     """StreamlitのWebsocket/PyArrowクラッシュを防ぐための自己修復処理"""
@@ -300,7 +300,7 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
-                    "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)", # ★今回変更した機能
+                    "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
                     "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
@@ -312,7 +312,7 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出", 
                     "【テキスト】文字数カウント", 
-                    "【フラグ】キーワード有無フラグ"
+                    "【フラグ】キーワード有無フラグ" # ★この機能を拡張
                 ])
             
             c3, c4 = st.columns([4, 6])
@@ -344,7 +344,8 @@ with col_ctrl:
                     with col4_2:
                         fe_group_suffix = st.text_input("後ろにつける文字 (例: 代, 度台, 円台)", value="代")
                 elif fe_method == "【フラグ】キーワード有無フラグ":
-                    fe_keyword = st.text_input("キーワード（フラグ抽出用）")
+                    # ★カンマ区切りで複数指定できるようにヒントを追加
+                    fe_keyword = st.text_input("キーワード (カンマ区切りで複数可)", placeholder="例: カレー, ハンバーグ, 魚")
                 elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
                     col4_1, col4_2 = st.columns([3, 7])
                     with col4_1:
@@ -562,7 +563,6 @@ with col_ctrl:
                             try:
                                 num = float(val)
                                 if pd.isna(num): return np.nan
-                                # マイナス気温なども考慮し、指定幅ごとに床関数で丸める
                                 return f"{int(np.floor(num / fe_group_width) * fe_group_width)}{fe_group_suffix}"
                             except Exception:
                                 return np.nan
@@ -683,9 +683,12 @@ with col_ctrl:
                         log.append(f"特徴量追加：{fe_column} を「年」と「ヶ月」の2列に分割")
 
                     elif fe_method == "【フラグ】キーワード有無フラグ":
+                        # ★複数キーワードを一括処理するロジックに変更
                         if fe_keyword.strip():
-                            df[f"{prefix}_{fe_keyword}_有無"] = source.astype(str).str.contains(re.escape(fe_keyword)).astype(int)
-                            log.append(f"特徴量追加：'{fe_keyword}' のフラグ化")
+                            kws = [k.strip() for k in fe_keyword.split(",") if k.strip()]
+                            for kw in kws:
+                                df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
+                            log.append(f"特徴量追加：{fe_column} から '{', '.join(kws)}' のフラグを作成 ({len(kws)}列追加)")
                             
                     elif fe_method == "【変換】数値のビン分割 (10分割)":
                         num_series = pd.to_numeric(source, errors="coerce")
