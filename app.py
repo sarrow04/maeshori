@@ -299,9 +299,9 @@ with col_ctrl:
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
+                    "【集約】カテゴリごとの平均値などを算出 (複数選択可)", # ★今回変更した機能
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
-                    "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
                     "【変換】数値のビン分割 (10分割)",
@@ -312,7 +312,7 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出", 
                     "【テキスト】文字数カウント", 
-                    "【フラグ】キーワード有無フラグ" # ★この機能を拡張
+                    "【フラグ】キーワード有無フラグ"
                 ])
             
             c3, c4 = st.columns([4, 6])
@@ -325,7 +325,7 @@ with col_ctrl:
                 fe_col2 = None
                 fe_op = "+"
                 fe_num_col = None
-                fe_agg = "mean (平均)"
+                fe_aggs = ["mean"]
                 fe_group_width = 10
                 fe_group_suffix = "代"
 
@@ -344,7 +344,6 @@ with col_ctrl:
                     with col4_2:
                         fe_group_suffix = st.text_input("後ろにつける文字 (例: 代, 度台, 円台)", value="代")
                 elif fe_method == "【フラグ】キーワード有無フラグ":
-                    # ★カンマ区切りで複数指定できるようにヒントを追加
                     fe_keyword = st.text_input("キーワード (カンマ区切りで複数可)", placeholder="例: カレー, ハンバーグ, 魚")
                 elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
                     col4_1, col4_2 = st.columns([3, 7])
@@ -352,12 +351,13 @@ with col_ctrl:
                         fe_op = st.radio("計算記号", ["+", "-", "×", "÷"], horizontal=True)
                     with col4_2:
                         fe_col2 = st.selectbox("計算する2つ目の列", df_cols)
-                elif fe_method == "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)":
+                elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
-                        fe_num_col = st.selectbox("集計する数値列 (例: 売上)", ["(なし)"] + get_numeric_columns(st.session_state.df))
+                        fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + get_numeric_columns(st.session_state.df))
                     with col4_2:
-                        fe_agg = st.selectbox("集計方法", ["mean (平均)", "sum (合計)", "max (最大)", "min (最小)", "count (件数)"])
+                        # ★複数同時に選択できるようにマルチセレクトに変更
+                        fe_aggs = st.multiselect("集計方法 (複数選択可)", ["mean", "median", "sum", "std", "max", "min", "count"], default=["mean"])
 
         # ----------------------------------------------------------------
         # STEP4: 大掃除
@@ -608,19 +608,19 @@ with col_ctrl:
                             df[f"{prefix}_{op_name}_{fe_col2}"] = res
                             log.append(f"特徴量追加：{fe_column} と {fe_col2} の四則演算({fe_op})")
 
-                    elif fe_method == "【集約】カテゴリごとの平均値などを算出 (Target Encoding風)":
-                        if fe_num_col and fe_num_col != "(なし)":
-                            agg_func = fe_agg.split(" ")[0]
+                    elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
+                        if fe_num_col and fe_num_col != "(なし)" and len(fe_aggs) > 0:
                             num_series = pd.to_numeric(df[fe_num_col], errors="coerce")
-                            
                             temp_df = pd.DataFrame({"cat": df[fe_column], "num": num_series, "src": df.get("_source_", "single")})
-                            if "train" in temp_df["src"].values:
-                                agg_map = temp_df[temp_df["src"] == "train"].groupby("cat")["num"].agg(agg_func)
-                            else:
-                                agg_map = temp_df.groupby("cat")["num"].agg(agg_func)
-                                
-                            df[f"{prefix}_{fe_num_col}_{agg_func}"] = df[fe_column].map(agg_map)
-                            log.append(f"特徴量追加：{fe_column} ごとの {fe_num_col} の {fe_agg} を算出")
+                            
+                            for agg_func in fe_aggs:
+                                if "train" in temp_df["src"].values:
+                                    agg_map = temp_df[temp_df["src"] == "train"].groupby("cat")["num"].agg(agg_func)
+                                else:
+                                    agg_map = temp_df.groupby("cat")["num"].agg(agg_func)
+                                    
+                                df[f"{prefix}_{fe_num_col}_{agg_func}"] = df[fe_column].map(agg_map)
+                            log.append(f"特徴量追加：{fe_column} ごとの {fe_num_col} の集約値({', '.join(fe_aggs)})を算出")
 
                     elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
                         num_s = pd.to_numeric(source, errors="coerce")
@@ -683,7 +683,6 @@ with col_ctrl:
                         log.append(f"特徴量追加：{fe_column} を「年」と「ヶ月」の2列に分割")
 
                     elif fe_method == "【フラグ】キーワード有無フラグ":
-                        # ★複数キーワードを一括処理するロジックに変更
                         if fe_keyword.strip():
                             kws = [k.strip() for k in fe_keyword.split(",") if k.strip()]
                             for kw in kws:
@@ -754,7 +753,11 @@ with col_view:
         is_processed = st.session_state.processed_df is not None
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布"])
+        # 共通の数値列リスト
+        num_cols_list = get_numeric_columns(target_df)
+        
+        # ★新機能の「グループ集計 (EDA)」タブを追加
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)"])
         
         with view_tabs[0]:
             if is_processed:
@@ -822,11 +825,43 @@ with col_view:
             st.dataframe(profile_table(target_df), use_container_width=True)
             st.divider()
             st.markdown("**ヒストグラム**")
-            num_cols = get_numeric_columns(target_df)
-            if num_cols:
-                hist_col = st.selectbox("分布を確認する列", num_cols)
+            if num_cols_list:
+                hist_col = st.selectbox("分布を確認する列", num_cols_list)
                 fig = make_histogram(target_df, hist_col)
                 if fig:
                     st.pyplot(fig)
             else:
                 st.info("数値列がありません。")
+                
+        # ★新機能: グループ集計 (EDA) タブ
+        with view_tabs[2]:
+            st.markdown("### 🔍 カテゴリごとの統計情報を確認")
+            st.write("曜日や天気などのカテゴリごとに、販売数などの数値（count, mean, median, sum, std）を一発で集計・比較します。")
+            
+            df_cols_clean = [c for c in target_df.columns if c != "_source_"]
+            cat_candidates = [c for c in df_cols_clean if c not in num_cols_list]
+            if not cat_candidates:
+                cat_candidates = df_cols_clean
+                
+            c_eda1, c_eda2 = st.columns(2)
+            with c_eda1:
+                grp_col = st.selectbox("グループ化する列 (曜日など)", ["(なし)"] + df_cols_clean)
+            with c_eda2:
+                tgt_col = st.selectbox("集計する数値列 (販売数など)", ["(なし)"] + num_cols_list)
+                
+            if grp_col != "(なし)" and tgt_col != "(なし)":
+                try:
+                    s_tgt = pd.to_numeric(target_df[tgt_col], errors="coerce")
+                    agg_df = s_tgt.groupby(target_df[grp_col]).agg(["count", "sum", "mean", "median", "std"]).round(1)
+                    
+                    # 曜日の並び替えに自動対応（月・火・水・木・金・土・日）
+                    weekday_order = ["月", "火", "水", "木", "金", "土", "日"]
+                    if any(w in agg_df.index for w in weekday_order):
+                        sorted_idx = [d for d in weekday_order if d in agg_df.index]
+                        other_idx = [d for d in agg_df.index if d not in weekday_order]
+                        agg_df = agg_df.reindex(sorted_idx + other_idx)
+                        st.info("💡 曜日データを検知したため、月曜日〜日曜日の順に自動ソートしました。")
+                        
+                    st.dataframe(agg_df, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"集計時にエラーが発生しました: {e}")
