@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns  # ★ヒートマップ用に新しく追加
 import re
 import io
 import zipfile
@@ -299,7 +300,7 @@ with col_ctrl:
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
-                    "【集約】カテゴリごとの平均値などを算出 (複数選択可)", # ★今回変更した機能
+                    "【集約】カテゴリごとの平均値などを算出 (複数選択可)",
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
@@ -356,7 +357,6 @@ with col_ctrl:
                     with col4_1:
                         fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + get_numeric_columns(st.session_state.df))
                     with col4_2:
-                        # ★複数同時に選択できるようにマルチセレクトに変更
                         fe_aggs = st.multiselect("集計方法 (複数選択可)", ["mean", "median", "sum", "std", "max", "min", "count"], default=["mean"])
 
         # ----------------------------------------------------------------
@@ -753,11 +753,10 @@ with col_view:
         is_processed = st.session_state.processed_df is not None
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         
-        # 共通の数値列リスト
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★新機能の「グループ集計 (EDA)」タブを追加
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)"])
+        # ★新機能「相関ヒートマップ」タブを追加
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ"])
         
         with view_tabs[0]:
             if is_processed:
@@ -833,7 +832,6 @@ with col_view:
             else:
                 st.info("数値列がありません。")
                 
-        # ★新機能: グループ集計 (EDA) タブ
         with view_tabs[2]:
             st.markdown("### 🔍 カテゴリごとの統計情報を確認")
             st.write("曜日や天気などのカテゴリごとに、販売数などの数値（count, mean, median, sum, std）を一発で集計・比較します。")
@@ -854,7 +852,6 @@ with col_view:
                     s_tgt = pd.to_numeric(target_df[tgt_col], errors="coerce")
                     agg_df = s_tgt.groupby(target_df[grp_col]).agg(["count", "sum", "mean", "median", "std"]).round(1)
                     
-                    # 曜日の並び替えに自動対応（月・火・水・木・金・土・日）
                     weekday_order = ["月", "火", "水", "木", "金", "土", "日"]
                     if any(w in agg_df.index for w in weekday_order):
                         sorted_idx = [d for d in weekday_order if d in agg_df.index]
@@ -865,3 +862,35 @@ with col_view:
                     st.dataframe(agg_df, use_container_width=True)
                 except Exception as e:
                     st.warning(f"集計時にエラーが発生しました: {e}")
+
+        # ★新機能: 相関ヒートマップ タブ
+        with view_tabs[3]:
+            st.markdown("### 🔥 変数間の相関関係 (ヒートマップ)")
+            st.write("数値データ同士の関連性の強さ（相関係数: -1.0 〜 1.0）を確認します。")
+            
+            if len(num_cols_list) >= 2:
+                st.write("※列数が多すぎると文字が潰れるため、表示する列を絞り込むことができます。")
+                corr_cols = st.multiselect("相関を確認する列を選択", num_cols_list, default=num_cols_list[:min(15, len(num_cols_list))])
+                
+                if len(corr_cols) >= 2:
+                    corr_matrix = target_df[corr_cols].corr()
+                    
+                    fig, ax = plt.subplots(figsize=(10, 8))
+                    sns.heatmap(corr_matrix, annot=True, fmt=".2f", cmap="coolwarm", center=0,
+                                vmin=-1, vmax=1, square=True, ax=ax, 
+                                cbar_kws={"shrink": .8}, annot_kws={"size": 9})
+                    
+                    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+                    ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+                    fig.tight_layout()
+                    
+                    st.pyplot(fig)
+                    
+                    if target_col != "(なし)" and target_col in corr_cols:
+                        st.markdown(f"**🎯 目的変数「{target_col}」との相関ランキング**")
+                        target_corr = corr_matrix[target_col].drop(target_col).sort_values(ascending=False)
+                        st.dataframe(target_corr.to_frame("相関係数"), use_container_width=True)
+                else:
+                    st.warning("相関を確認するには、2つ以上の列を選択してください。")
+            else:
+                st.info("数値列が2つ以上ないため、相関行列を計算できません。")
