@@ -1,11 +1,17 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import matplotlib.subplots as plt
 import seaborn as sns
 import re
 import io
 import zipfile
+
+# グラフの日本語文字化け対策（インストールされている場合のみ適用）
+try:
+    import japanize_matplotlib
+except ImportError:
+    pass
 
 st.set_page_config(page_title="拡張版 CSV前処理アプリ", layout="wide")
 
@@ -104,6 +110,7 @@ def profile_table(df):
         rows.append(row)
     return pd.DataFrame(rows)
 
+import matplotlib.pyplot as plt
 def make_histogram(df, column):
     if column == "_source_": 
         return None
@@ -301,9 +308,9 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
                     "【集約】カテゴリごとの平均値などを算出 (複数選択可)",
-                    "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", # ★新規追加
+                    "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", 
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
-                    "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)", # ★新規追加
+                    "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)",
                     "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
@@ -375,7 +382,7 @@ with col_ctrl:
             min_count = st.number_input("出現件数がこれ以下のダミー列を自動削除", min_value=0, value=0)
 
             st.divider()
-            st.markdown("##### 🗑 手動で選んで削除")
+            st.markdown("##### 🗑 手提で選んで削除")
             drop_columns = st.multiselect("リストから選択", df_cols)
 
             st.divider()
@@ -865,13 +872,34 @@ with col_view:
                     agg_df = s_tgt.groupby(target_df[grp_col]).agg(["count", "sum", "mean", "median", "std"]).round(1)
                     
                     weekday_order = ["月", "火", "水", "木", "金", "土", "日"]
+                    plot_order = None
                     if any(w in agg_df.index for w in weekday_order):
                         sorted_idx = [d for d in weekday_order if d in agg_df.index]
                         other_idx = [d for d in agg_df.index if d not in weekday_order]
                         agg_df = agg_df.reindex(sorted_idx + other_idx)
+                        plot_order = sorted_idx + other_idx
                         st.info("💡 曜日データを検知したため、月曜日〜日曜日の順に自動ソートしました。")
                         
                     st.dataframe(agg_df, use_container_width=True)
+                    
+                    # ★今回追加：箱ひげ図の描画
+                    st.markdown("#### 📦 箱ひげ図 (分布と外れ値の確認)")
+                    fig_box, ax_box = plt.subplots(figsize=(10, 6))
+                    
+                    # 欠損値や数値化できないデータを除外して描画用にクリーンアップ
+                    plot_df = target_df[[grp_col, tgt_col]].dropna()
+                    plot_df[tgt_col] = pd.to_numeric(plot_df[tgt_col], errors="coerce")
+                    plot_df = plot_df.dropna()
+                    
+                    # 箱ひげ図を描画（さらにストリッププロットで実データを薄く重ねる）
+                    sns.boxplot(data=plot_df, x=grp_col, y=tgt_col, order=plot_order, ax=ax_box, palette="Set3", showfliers=False)
+                    sns.stripplot(data=plot_df, x=grp_col, y=tgt_col, order=plot_order, ax=ax_box, color='black', alpha=0.3, size=4, jitter=True)
+                    
+                    ax_box.set_title(f"{grp_col} ごとの {tgt_col} の分布", fontsize=12)
+                    ax_box.set_xticklabels(ax_box.get_xticklabels(), rotation=45, ha='right')
+                    fig_box.tight_layout()
+                    st.pyplot(fig_box)
+                    
                 except Exception as e:
                     st.warning(f"集計時にエラーが発生しました: {e}")
 
