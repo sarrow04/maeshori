@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns  # ★ヒートマップ用に新しく追加
+import seaborn as sns
 import re
 import io
 import zipfile
@@ -301,7 +301,9 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
                     "【集約】カテゴリごとの平均値などを算出 (複数選択可)",
+                    "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", # ★新規追加
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
+                    "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)", # ★新規追加
                     "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
@@ -338,6 +340,8 @@ with col_ctrl:
                         "yyyy/MM/dd (例: 2014/01/05)",
                         "yyyyMMdd (例: 20140105)"
                     ])
+                elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
+                    st.info("💡 category型を保存するには、ダウンロード時に「Parquet形式」を選んでください。（CSV形式だと文字列に戻ってしまいます）")
                 elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
@@ -558,6 +562,15 @@ with col_ctrl:
                         df[f"{prefix}_ID"] = np.where(pd.isna(source), np.nan, codes)
                         log.append(f"特徴量追加：{fe_column} を数値ID（Label Encoding）に変換")
 
+                    elif fe_method == "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)":
+                        freq_map = source.value_counts(dropna=False)
+                        df[f"{prefix}_頻度"] = source.map(freq_map)
+                        log.append(f"特徴量追加：{fe_column} を頻度(Count Encoding)に変換")
+                        
+                    elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
+                        df[f"{prefix}_cat"] = source.astype("category")
+                        log.append(f"型変換：{fe_column} を category 型に変換")
+
                     elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
                         def to_group(val):
                             try:
@@ -755,7 +768,6 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★新機能「相関ヒートマップ」タブを追加
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ"])
         
         with view_tabs[0]:
@@ -863,7 +875,6 @@ with col_view:
                 except Exception as e:
                     st.warning(f"集計時にエラーが発生しました: {e}")
 
-        # ★新機能: 相関ヒートマップ タブ
         with view_tabs[3]:
             st.markdown("### 🔥 変数間の相関関係 (ヒートマップ)")
             st.write("数値データ同士の関連性の強さ（相関係数: -1.0 〜 1.0）を確認します。")
