@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.subplots as plt
+import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 import io
@@ -110,7 +110,6 @@ def profile_table(df):
         rows.append(row)
     return pd.DataFrame(rows)
 
-import matplotlib.pyplot as plt
 def make_histogram(df, column):
     if column == "_source_": 
         return None
@@ -382,7 +381,7 @@ with col_ctrl:
             min_count = st.number_input("出現件数がこれ以下のダミー列を自動削除", min_value=0, value=0)
 
             st.divider()
-            st.markdown("##### 🗑 手提で選んで削除")
+            st.markdown("##### 🗑 手動で選んで削除")
             drop_columns = st.multiselect("リストから選択", df_cols)
 
             st.divider()
@@ -882,16 +881,13 @@ with col_view:
                         
                     st.dataframe(agg_df, use_container_width=True)
                     
-                    # ★今回追加：箱ひげ図の描画
                     st.markdown("#### 📦 箱ひげ図 (分布と外れ値の確認)")
                     fig_box, ax_box = plt.subplots(figsize=(10, 6))
                     
-                    # 欠損値や数値化できないデータを除外して描画用にクリーンアップ
                     plot_df = target_df[[grp_col, tgt_col]].dropna()
                     plot_df[tgt_col] = pd.to_numeric(plot_df[tgt_col], errors="coerce")
                     plot_df = plot_df.dropna()
                     
-                    # 箱ひげ図を描画（さらにストリッププロットで実データを薄く重ねる）
                     sns.boxplot(data=plot_df, x=grp_col, y=tgt_col, order=plot_order, ax=ax_box, palette="Set3", showfliers=False)
                     sns.stripplot(data=plot_df, x=grp_col, y=tgt_col, order=plot_order, ax=ax_box, color='black', alpha=0.3, size=4, jitter=True)
                     
