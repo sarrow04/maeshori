@@ -774,7 +774,8 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ"])
+        # ★新機能「標準偏差の比較」タブを追加
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較"])
         
         with view_tabs[0]:
             if is_processed:
@@ -929,3 +930,52 @@ with col_view:
                     st.warning("相関を確認するには、2つ以上の列を選択してください。")
             else:
                 st.info("数値列が2つ以上ないため、相関行列を計算できません。")
+                
+        # ★新機能: 標準偏差の比較 タブ
+        with view_tabs[4]:
+            st.markdown("### 📈 目的変数との標準偏差の比較")
+            st.write("目的変数と他の数値カラムの「標準偏差（ばらつきの大きさ）」を計算し、その差が大きい順にランキング表示します。（スケールの違いや外れ値の発見に役立ちます）")
+            
+            if target_col == "(なし)":
+                st.warning("👈 左側のメニューで「目的変数」を選択してください。")
+            elif target_col not in num_cols_list:
+                st.warning(f"目的変数「{target_col}」が数値データではないため、標準偏差を計算できません。")
+            elif len(num_cols_list) < 2:
+                st.info("比較対象となる他の数値列がありません。")
+            else:
+                try:
+                    # Trainデータがある場合はTrainのみで計算
+                    if "train" in target_df.get("_source_", pd.Series()).values:
+                        eval_df = target_df[target_df["_source_"] == "train"]
+                        st.caption("※未来のデータの混入を防ぐため、Trainデータのみを使用して計算しています。")
+                    else:
+                        eval_df = target_df
+                        
+                    target_std = eval_df[target_col].std()
+                    st.markdown(f"**🎯 目的変数「{target_col}」の標準偏差:** `{target_std:.2f}`")
+                    
+                    std_results = []
+                    for col in num_cols_list:
+                        if col != target_col:
+                            c_std = eval_df[col].std()
+                            diff = abs(target_std - c_std)
+                            std_results.append({
+                                "カラム名": col,
+                                "標準偏差": round(c_std, 2),
+                                "目的変数との差": round(diff, 2)
+                            })
+                    
+                    std_df = pd.DataFrame(std_results).sort_values("目的変数との差", ascending=False)
+                    
+                    st.dataframe(std_df, use_container_width=True)
+                    
+                    if not std_df.empty:
+                        st.markdown("#### 📊 差が大きいカラム トップ20")
+                        fig_std, ax_std = plt.subplots(figsize=(10, max(4, len(std_df.head(20))*0.4)))
+                        sns.barplot(data=std_df.head(20), x="目的変数との差", y="カラム名", palette="magma", ax=ax_std)
+                        ax_std.set_title(f"目的変数「{target_col}」との標準偏差の差 (Top 20)", fontsize=12)
+                        ax_std.set_xlabel("標準偏差の差 (絶対値)")
+                        fig_std.tight_layout()
+                        st.pyplot(fig_std)
+                except Exception as e:
+                    st.error(f"計算時にエラーが発生しました: {e}")
