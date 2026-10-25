@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.subplots as plt_subs
 import matplotlib.pyplot as plt
 import seaborn as sns
 import re
@@ -775,7 +774,6 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★新機能「特徴量重要度 (AI判定)」タブを追加（全6タブ）
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較", "🌳 特徴量重要度 (AI判定)"])
         
         with view_tabs[0]:
@@ -1045,7 +1043,6 @@ with col_view:
                 except Exception as e:
                     st.error(f"計算時にエラーが発生しました: {e}")
 
-        # ★新機能: 特徴量重要度 (AI判定) タブ
         with view_tabs[5]:
             st.markdown("### 🌳 特徴量重要度 (AI判定)")
             st.write("ボタンを押すと、背後で簡易的なAI（LightGBM）を学習させ、「どの特徴量が目的変数の予測に最も貢献しているか」をランキング化します。")
@@ -1059,35 +1056,29 @@ with col_view:
                         try:
                             import lightgbm as lgb
                             
-                            # Trainデータの抽出
                             if "train" in target_df.get("_source_", pd.Series()).values:
                                 train_df_model = target_df[target_df["_source_"] == "train"].copy()
                             else:
                                 train_df_model = target_df.copy()
                                 
-                            # 目的変数が欠損している行は学習できないため除外
                             train_df_model = train_df_model.dropna(subset=[target_col])
                             
-                            # 目的変数の準備
                             y = pd.to_numeric(train_df_model[target_col], errors="coerce")
                             valid_idx = y.notna()
                             y = y[valid_idx]
                             X = train_df_model[valid_idx].drop(columns=[target_col, "_source_"], errors="ignore")
                             
-                            # 特徴量の準備（文字列やカテゴリを簡易的に数値化）
                             X_features = pd.DataFrame()
                             for c in X.columns:
                                 if pd.api.types.is_numeric_dtype(X[c]):
                                     X_features[c] = X[c]
                                 elif pd.api.types.is_string_dtype(X[c]) or pd.api.types.is_object_dtype(X[c]) or isinstance(X[c].dtype, pd.CategoricalDtype):
-                                    # scikit-learnを使わず、Pandas標準機能で安全にLabelEncoding
                                     X_features[c] = pd.factorize(X[c])[0]
-                                    X_features[c] = X_features[c].replace(-1, np.nan) # 欠損値はNaNのまま保持
+                                    X_features[c] = X_features[c].replace(-1, np.nan)
                                     
                             if X_features.empty:
                                 st.error("学習に使える特徴量がありません。")
                             else:
-                                # 回帰モデルで学習 (決定木100本でサクッと計算)
                                 model = lgb.LGBMRegressor(n_estimators=100, random_state=42, n_jobs=-1)
                                 model.fit(X_features, y)
                                 
