@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.subplots as plt_subs
 import matplotlib.pyplot as plt
 import seaborn as sns
 import re
@@ -774,7 +775,8 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較"])
+        # ★新機能「特徴量重要度 (AI判定)」タブを追加（全6タブ）
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較", "🌳 特徴量重要度 (AI判定)"])
         
         with view_tabs[0]:
             if is_processed:
@@ -978,7 +980,6 @@ with col_view:
                         fig_std.tight_layout()
                         st.pyplot(fig_std)
                         
-                    # ★今回変更：グラフをなくし、数値ベースでの原因特定機能を追加
                     st.divider()
                     st.markdown("### 🔍 異常値・極端な値の深掘り (数値ベースでの原因分析)")
                     st.write("ランキング表からカラムを選択すると、その値が極端に大きい上位データを抽出し、**「他の特徴量にどんな異常な偏りがあるか」を数値で比較・特定**します。")
@@ -992,7 +993,6 @@ with col_view:
                         
                         table_k = st.slider("抽出する極端な値の件数 (上位N件)", min_value=3, max_value=100, value=10, step=1)
                         
-                        # 上位N件とそれ以外に分割
                         top_k_df = temp_df.nlargest(table_k, deepdive_col)
                         normal_df = temp_df.drop(top_k_df.index)
                         
@@ -1006,7 +1006,6 @@ with col_view:
                                 normal_mean = normal_df[col].mean()
                                 diff = top_mean - normal_mean
                                 
-                                # 0除算対策
                                 if pd.isna(top_mean) or pd.isna(normal_mean):
                                     ratio = np.nan
                                 elif normal_mean == 0:
@@ -1022,7 +1021,6 @@ with col_view:
                                     "通常時の何倍か": round(ratio, 2) if not pd.isna(ratio) else np.nan
                                 })
                         
-                        # 差が大きい順にソート (絶対値キーでソートしやすくするため一時カラム追加)
                         compare_df = pd.DataFrame(compare_results)
                         compare_df["abs_diff"] = compare_df["通常との差"].abs()
                         compare_df = compare_df.sort_values(by="abs_diff", ascending=False).drop(columns=["abs_diff"])
@@ -1033,7 +1031,6 @@ with col_view:
                         st.dataframe(top_k_df[num_cols_list].describe().T[['mean', 'std', 'min', 'max']], use_container_width=True)
                         
                         st.markdown(f"#### 📋 3. 実際の生データ (上位{table_k}件)")
-                        # 比較しやすいように「目的変数」と「選択したカラム」を左側に持ってくる
                         all_columns = top_k_df.columns.tolist()
                         front_cols = []
                         if target_col in all_columns:
@@ -1042,10 +1039,79 @@ with col_view:
                             front_cols.append(deepdive_col)
                             
                         other_cols = [c for c in all_columns if c not in front_cols and c != "_source_"]
-                        
-                        # 並び替えて表示
                         top_k_df_ordered = top_k_df[front_cols + other_cols]
                         st.dataframe(top_k_df_ordered, use_container_width=True)
                         
                 except Exception as e:
                     st.error(f"計算時にエラーが発生しました: {e}")
+
+        # ★新機能: 特徴量重要度 (AI判定) タブ
+        with view_tabs[5]:
+            st.markdown("### 🌳 特徴量重要度 (AI判定)")
+            st.write("ボタンを押すと、背後で簡易的なAI（LightGBM）を学習させ、「どの特徴量が目的変数の予測に最も貢献しているか」をランキング化します。")
+            st.info("💡 まだ数値化していない文字カラムがあっても、この処理の中だけで全自動で数値（ID化）に変換して学習するため、エラーを気にせずボタン一つでテストできます！")
+            
+            if target_col == "(なし)":
+                st.warning("👈 左側のメニューで「目的変数」を選択してください。")
+            else:
+                if st.button("🚀 AIで特徴量重要度を計算する", type="primary", use_container_width=True):
+                    with st.spinner("モデルを学習中...（データ量によっては数秒〜数十秒かかります）"):
+                        try:
+                            import lightgbm as lgb
+                            
+                            # Trainデータの抽出
+                            if "train" in target_df.get("_source_", pd.Series()).values:
+                                train_df_model = target_df[target_df["_source_"] == "train"].copy()
+                            else:
+                                train_df_model = target_df.copy()
+                                
+                            # 目的変数が欠損している行は学習できないため除外
+                            train_df_model = train_df_model.dropna(subset=[target_col])
+                            
+                            # 目的変数の準備
+                            y = pd.to_numeric(train_df_model[target_col], errors="coerce")
+                            valid_idx = y.notna()
+                            y = y[valid_idx]
+                            X = train_df_model[valid_idx].drop(columns=[target_col, "_source_"], errors="ignore")
+                            
+                            # 特徴量の準備（文字列やカテゴリを簡易的に数値化）
+                            X_features = pd.DataFrame()
+                            for c in X.columns:
+                                if pd.api.types.is_numeric_dtype(X[c]):
+                                    X_features[c] = X[c]
+                                elif pd.api.types.is_string_dtype(X[c]) or pd.api.types.is_object_dtype(X[c]) or isinstance(X[c].dtype, pd.CategoricalDtype):
+                                    # scikit-learnを使わず、Pandas標準機能で安全にLabelEncoding
+                                    X_features[c] = pd.factorize(X[c])[0]
+                                    X_features[c] = X_features[c].replace(-1, np.nan) # 欠損値はNaNのまま保持
+                                    
+                            if X_features.empty:
+                                st.error("学習に使える特徴量がありません。")
+                            else:
+                                # 回帰モデルで学習 (決定木100本でサクッと計算)
+                                model = lgb.LGBMRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+                                model.fit(X_features, y)
+                                
+                                importance_df = pd.DataFrame({
+                                    "特徴量": X_features.columns,
+                                    "重要度 (Feature Importance)": model.feature_importances_
+                                }).sort_values("重要度 (Feature Importance)", ascending=False)
+                                
+                                st.success("✅ 学習と重要度の算出が完了しました！")
+                                
+                                c_imp1, c_imp2 = st.columns([4, 6])
+                                with c_imp1:
+                                    st.markdown("#### 🏆 重要度ランキング")
+                                    st.dataframe(importance_df, use_container_width=True)
+                                    
+                                with c_imp2:
+                                    st.markdown("#### 📊 上位20件のグラフ")
+                                    fig_imp, ax_imp = plt.subplots(figsize=(10, max(5, len(importance_df.head(20))*0.4)))
+                                    sns.barplot(data=importance_df.head(20), x="重要度 (Feature Importance)", y="特徴量", ax=ax_imp, palette="viridis")
+                                    ax_imp.set_title(f"「{target_col}」に対する特徴量重要度 (Top 20)", fontsize=12)
+                                    fig_imp.tight_layout()
+                                    st.pyplot(fig_imp)
+                                    
+                        except ImportError:
+                            st.error("⚠️ `lightgbm` ライブラリがインストールされていません。ターミナルで `pip install lightgbm` を実行してから再度お試しください。")
+                        except Exception as e:
+                            st.error(f"学習中にエラーが発生しました: {e}")
