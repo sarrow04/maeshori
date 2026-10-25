@@ -978,10 +978,10 @@ with col_view:
                         fig_std.tight_layout()
                         st.pyplot(fig_std)
                         
-                    # ★今回追加：異常値・極端な値の深掘りセクション（散布図と可変テーブル）
+                    # ★今回変更：グラフをなくし、数値ベースでの原因特定機能を追加
                     st.divider()
-                    st.markdown("### 🔍 異常値・極端な値の深掘り")
-                    st.write("ランキング表からカラムを選択すると、全体像を把握する**「散布図」**と、極端な値を持つ**「上位データの表」**を表示し、原因を細かく分析できます。")
+                    st.markdown("### 🔍 異常値・極端な値の深掘り (数値ベースでの原因分析)")
+                    st.write("ランキング表からカラムを選択すると、その値が極端に大きい上位データを抽出し、**「他の特徴量にどんな異常な偏りがあるか」を数値で比較・特定**します。")
                     
                     deepdive_col = st.selectbox("詳細を確認したいカラムを選択してください", std_df["カラム名"].tolist())
                     
@@ -990,25 +990,49 @@ with col_view:
                         temp_df[deepdive_col] = pd.to_numeric(temp_df[deepdive_col], errors="coerce")
                         temp_df[target_col] = pd.to_numeric(temp_df[target_col], errors="coerce")
                         
-                        # 1. 散布図の描画
-                        st.markdown(f"#### 📊 「{deepdive_col}」と「{target_col}」の関係性 (散布図)")
-                        st.write("右端に離れた点（極端な値）が、目的変数に対してどのような影響を与えているかを視覚的に確認します。赤い線はデータ全体のトレンド（傾向）を示します。")
+                        table_k = st.slider("抽出する極端な値の件数 (上位N件)", min_value=3, max_value=100, value=10, step=1)
                         
-                        fig_scat, ax_scat = plt.subplots(figsize=(8, 5))
-                        sns.regplot(data=temp_df, x=deepdive_col, y=target_col, 
-                                    scatter_kws={'alpha':0.5, 'color':'#1f77b4'}, 
-                                    line_kws={'color':'red'}, ax=ax_scat)
-                        ax_scat.set_title(f"{deepdive_col} vs {target_col} の散布図", fontsize=12)
-                        fig_scat.tight_layout()
-                        st.pyplot(fig_scat)
-                        
-                        # 2. テーブル抽出
-                        st.markdown(f"#### 📋 「{deepdive_col}」の極端な値ランキング")
-                        table_k = st.slider("表に抽出・表示する件数", min_value=3, max_value=50, value=10, step=1)
-                        
-                        # 値が大きい上位N件を取得
+                        # 上位N件とそれ以外に分割
                         top_k_df = temp_df.nlargest(table_k, deepdive_col)
+                        normal_df = temp_df.drop(top_k_df.index)
                         
+                        st.markdown(f"#### 📊 1. 極端な値を持つデータの「他の特徴量とのズレ」を数値で比較")
+                        st.write(f"「{deepdive_col}」が上位{table_k}件の時、他のカラムの平均値が通常時とどれくらい違うかを計算し、差が大きい順に表示します。")
+                        
+                        compare_results = []
+                        for col in num_cols_list:
+                            if col != deepdive_col and col in temp_df.columns:
+                                top_mean = top_k_df[col].mean()
+                                normal_mean = normal_df[col].mean()
+                                diff = top_mean - normal_mean
+                                
+                                # 0除算対策
+                                if pd.isna(top_mean) or pd.isna(normal_mean):
+                                    ratio = np.nan
+                                elif normal_mean == 0:
+                                    ratio = np.inf if top_mean > 0 else (-np.inf if top_mean < 0 else 1.0)
+                                else:
+                                    ratio = top_mean / normal_mean
+                                    
+                                compare_results.append({
+                                    "影響を受けているカラム": col,
+                                    f"上位{table_k}件の平均": round(top_mean, 2) if not pd.isna(top_mean) else np.nan,
+                                    "通常の平均": round(normal_mean, 2) if not pd.isna(normal_mean) else np.nan,
+                                    "通常との差": round(diff, 2) if not pd.isna(diff) else np.nan,
+                                    "通常時の何倍か": round(ratio, 2) if not pd.isna(ratio) else np.nan
+                                })
+                        
+                        # 差が大きい順にソート (絶対値キーでソートしやすくするため一時カラム追加)
+                        compare_df = pd.DataFrame(compare_results)
+                        compare_df["abs_diff"] = compare_df["通常との差"].abs()
+                        compare_df = compare_df.sort_values(by="abs_diff", ascending=False).drop(columns=["abs_diff"])
+                        
+                        st.dataframe(compare_df, use_container_width=True)
+                        
+                        st.markdown(f"#### 📈 2. 基本統計量 (上位{table_k}件のみ)")
+                        st.dataframe(top_k_df[num_cols_list].describe().T[['mean', 'std', 'min', 'max']], use_container_width=True)
+                        
+                        st.markdown(f"#### 📋 3. 実際の生データ (上位{table_k}件)")
                         # 比較しやすいように「目的変数」と「選択したカラム」を左側に持ってくる
                         all_columns = top_k_df.columns.tolist()
                         front_cols = []
