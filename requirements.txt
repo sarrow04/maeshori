@@ -5,4 +5,5 @@ matplotlib
 pyarrow
 seaborn
 lightgbm
+scikit-learn
 
