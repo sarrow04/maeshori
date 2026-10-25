@@ -315,6 +315,7 @@ with col_ctrl:
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
                     "【変換】数値のビン分割 (10分割)",
                     "【時系列】日付列から年・月・日・曜日を抽出",  
+                    "【時系列】過去の値を取得 (ラグ特徴量)", # ★新規追加
                     "【時系列】日付のフォーマット変換", 
                     "【抽出】「徒歩〇分」から最短分数を抽出", 
                     "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)", 
@@ -337,6 +338,8 @@ with col_ctrl:
                 fe_aggs = ["mean"]
                 fe_group_width = 10
                 fe_group_suffix = "代"
+                fe_lag_n = 1
+                fe_lag_group = "(なし)"
 
                 if fe_method == "【時系列】日付のフォーマット変換":
                     date_format = st.selectbox("変換後のフォーマット", [
@@ -346,6 +349,12 @@ with col_ctrl:
                         "yyyy/MM/dd (例: 2014/01/05)",
                         "yyyyMMdd (例: 20140105)"
                     ])
+                elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
+                    col4_1, col4_2 = st.columns(2)
+                    with col4_1:
+                        fe_lag_n = st.number_input("何行前の値を取得するか(ラグ数)", min_value=1, max_value=365, value=1, help="例: 1日前なら「1」、7日前なら「7」")
+                    with col4_2:
+                        fe_lag_group = st.selectbox("グループ化してラグを取る列 (任意)", ["(なし)"] + df_cols, help="店舗別やメニュー別に過去の値を取りたい場合に指定します。")
                 elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
                     st.info("💡 category型を保存するには、ダウンロード時に「Parquet形式」を選んでください。（CSV形式だと文字列に戻ってしまいます）")
                 elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
@@ -596,6 +605,14 @@ with col_ctrl:
                         df[f"{prefix}_曜日"] = dt_series.dt.dayofweek
                         log.append(f"特徴量追加：{fe_column} から「年」「月」「日」「曜日」をそれぞれ抽出")
                         
+                    elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
+                        if fe_lag_group != "(なし)":
+                            df[f"{prefix}_{fe_lag_group}別_{fe_lag_n}ラグ"] = df.groupby(fe_lag_group)[fe_column].shift(fe_lag_n)
+                            log.append(f"特徴量追加：{fe_lag_group}ごとに {fe_column} の {fe_lag_n}行前(ラグ)を取得")
+                        else:
+                            df[f"{prefix}_{fe_lag_n}ラグ"] = df[fe_column].shift(fe_lag_n)
+                            log.append(f"特徴量追加：{fe_column} の {fe_lag_n}行前(ラグ)を取得")
+                            
                     elif fe_method == "【時系列】日付のフォーマット変換":
                         dt_series = pd.to_datetime(source, errors="coerce")
                         def format_date(x, fmt):
@@ -774,7 +791,8 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較", "🌳 特徴量重要度 (AI判定)"])
+        # ★標準偏差のタブを削除し、全5タブに変更
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "🌳 特徴量重要度 (AI判定)"])
         
         with view_tabs[0]:
             if is_processed:
@@ -931,119 +949,6 @@ with col_view:
                 st.info("数値列が2つ以上ないため、相関行列を計算できません。")
                 
         with view_tabs[4]:
-            st.markdown("### 📈 目的変数との標準偏差の比較")
-            st.write("目的変数と他の数値カラムの「標準偏差（ばらつきの大きさ）」を計算し、その差が大きい順にランキング表示します。（スケールの違いや外れ値の発見に役立ちます）")
-            
-            if target_col == "(なし)":
-                st.warning("👈 左側のメニューで「目的変数」を選択してください。")
-            elif target_col not in num_cols_list:
-                st.warning(f"目的変数「{target_col}」が数値データではないため、標準偏差を計算できません。")
-            elif len(num_cols_list) < 2:
-                st.info("比較対象となる他の数値列がありません。")
-            else:
-                try:
-                    if "train" in target_df.get("_source_", pd.Series()).values:
-                        eval_df = target_df[target_df["_source_"] == "train"]
-                        st.caption("※未来のデータの混入を防ぐため、Trainデータのみを使用して計算しています。")
-                    else:
-                        eval_df = target_df
-                        
-                    target_std = eval_df[target_col].std()
-                    st.markdown(f"**🎯 目的変数「{target_col}」の標準偏差:** `{target_std:.2f}`")
-                    
-                    std_results = []
-                    for col in num_cols_list:
-                        if col != target_col:
-                            c_std = eval_df[col].std()
-                            diff = abs(target_std - c_std)
-                            std_results.append({
-                                "カラム名": col,
-                                "標準偏差": round(c_std, 2),
-                                "目的変数との差": round(diff, 2)
-                            })
-                    
-                    std_df = pd.DataFrame(std_results).sort_values("目的変数との差", ascending=False)
-                    
-                    top_n = st.number_input("抽出・表示する件数 (上位N件)", min_value=5, max_value=100, value=20, step=5)
-                    st.markdown(f"#### 📊 差が大きいカラム トップ {top_n}")
-                    
-                    display_std_df = std_df.head(top_n)
-                    st.dataframe(display_std_df, use_container_width=True)
-                    
-                    if not display_std_df.empty:
-                        fig_std, ax_std = plt.subplots(figsize=(10, max(4, len(display_std_df)*0.4)))
-                        sns.barplot(data=display_std_df, x="目的変数との差", y="カラム名", palette="magma", ax=ax_std)
-                        ax_std.set_title(f"目的変数「{target_col}」との標準偏差の差 (Top {top_n})", fontsize=12)
-                        ax_std.set_xlabel("標準偏差の差 (絶対値)")
-                        fig_std.tight_layout()
-                        st.pyplot(fig_std)
-                        
-                    st.divider()
-                    st.markdown("### 🔍 異常値・極端な値の深掘り (数値ベースでの原因分析)")
-                    st.write("ランキング表からカラムを選択すると、その値が極端に大きい上位データを抽出し、**「他の特徴量にどんな異常な偏りがあるか」を数値で比較・特定**します。")
-                    
-                    deepdive_col = st.selectbox("詳細を確認したいカラムを選択してください", std_df["カラム名"].tolist())
-                    
-                    if deepdive_col:
-                        temp_df = target_df.copy()
-                        temp_df[deepdive_col] = pd.to_numeric(temp_df[deepdive_col], errors="coerce")
-                        temp_df[target_col] = pd.to_numeric(temp_df[target_col], errors="coerce")
-                        
-                        table_k = st.slider("抽出する極端な値の件数 (上位N件)", min_value=3, max_value=100, value=10, step=1)
-                        
-                        top_k_df = temp_df.nlargest(table_k, deepdive_col)
-                        normal_df = temp_df.drop(top_k_df.index)
-                        
-                        st.markdown(f"#### 📊 1. 極端な値を持つデータの「他の特徴量とのズレ」を数値で比較")
-                        st.write(f"「{deepdive_col}」が上位{table_k}件の時、他のカラムの平均値が通常時とどれくらい違うかを計算し、差が大きい順に表示します。")
-                        
-                        compare_results = []
-                        for col in num_cols_list:
-                            if col != deepdive_col and col in temp_df.columns:
-                                top_mean = top_k_df[col].mean()
-                                normal_mean = normal_df[col].mean()
-                                diff = top_mean - normal_mean
-                                
-                                if pd.isna(top_mean) or pd.isna(normal_mean):
-                                    ratio = np.nan
-                                elif normal_mean == 0:
-                                    ratio = np.inf if top_mean > 0 else (-np.inf if top_mean < 0 else 1.0)
-                                else:
-                                    ratio = top_mean / normal_mean
-                                    
-                                compare_results.append({
-                                    "影響を受けているカラム": col,
-                                    f"上位{table_k}件の平均": round(top_mean, 2) if not pd.isna(top_mean) else np.nan,
-                                    "通常の平均": round(normal_mean, 2) if not pd.isna(normal_mean) else np.nan,
-                                    "通常との差": round(diff, 2) if not pd.isna(diff) else np.nan,
-                                    "通常時の何倍か": round(ratio, 2) if not pd.isna(ratio) else np.nan
-                                })
-                        
-                        compare_df = pd.DataFrame(compare_results)
-                        compare_df["abs_diff"] = compare_df["通常との差"].abs()
-                        compare_df = compare_df.sort_values(by="abs_diff", ascending=False).drop(columns=["abs_diff"])
-                        
-                        st.dataframe(compare_df, use_container_width=True)
-                        
-                        st.markdown(f"#### 📈 2. 基本統計量 (上位{table_k}件のみ)")
-                        st.dataframe(top_k_df[num_cols_list].describe().T[['mean', 'std', 'min', 'max']], use_container_width=True)
-                        
-                        st.markdown(f"#### 📋 3. 実際の生データ (上位{table_k}件)")
-                        all_columns = top_k_df.columns.tolist()
-                        front_cols = []
-                        if target_col in all_columns:
-                            front_cols.append(target_col)
-                        if deepdive_col in all_columns:
-                            front_cols.append(deepdive_col)
-                            
-                        other_cols = [c for c in all_columns if c not in front_cols and c != "_source_"]
-                        top_k_df_ordered = top_k_df[front_cols + other_cols]
-                        st.dataframe(top_k_df_ordered, use_container_width=True)
-                        
-                except Exception as e:
-                    st.error(f"計算時にエラーが発生しました: {e}")
-
-        with view_tabs[5]:
             st.markdown("### 🌳 特徴量重要度 (AI判定)")
             st.write("ボタンを押すと、背後で簡易的なAI（LightGBM）を学習させ、「どの特徴量が目的変数の予測に最も貢献しているか」をランキング化します。")
             st.info("💡 まだ数値化していない文字カラムがあっても、この処理の中だけで全自動で数値（ID化）に変換して学習するため、エラーを気にせずボタン一つでテストできます！")
