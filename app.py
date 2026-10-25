@@ -774,7 +774,6 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★新機能「標準偏差の比較」タブを追加
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "📈 標準偏差の比較"])
         
         with view_tabs[0]:
@@ -931,7 +930,6 @@ with col_view:
             else:
                 st.info("数値列が2つ以上ないため、相関行列を計算できません。")
                 
-        # ★新機能: 標準偏差の比較 タブ
         with view_tabs[4]:
             st.markdown("### 📈 目的変数との標準偏差の比較")
             st.write("目的変数と他の数値カラムの「標準偏差（ばらつきの大きさ）」を計算し、その差が大きい順にランキング表示します。（スケールの違いや外れ値の発見に役立ちます）")
@@ -944,7 +942,6 @@ with col_view:
                 st.info("比較対象となる他の数値列がありません。")
             else:
                 try:
-                    # Trainデータがある場合はTrainのみで計算
                     if "train" in target_df.get("_source_", pd.Series()).values:
                         eval_df = target_df[target_df["_source_"] == "train"]
                         st.caption("※未来のデータの混入を防ぐため、Trainデータのみを使用して計算しています。")
@@ -967,13 +964,19 @@ with col_view:
                     
                     std_df = pd.DataFrame(std_results).sort_values("目的変数との差", ascending=False)
                     
-                    st.dataframe(std_df, use_container_width=True)
+                    # ★ここでユーザーが自由に抽出行数を選べるように変更
+                    top_n = st.number_input("抽出・表示する件数 (上位N件)", min_value=5, max_value=100, value=20, step=5)
+                    st.markdown(f"#### 📊 差が大きいカラム トップ {top_n}")
                     
-                    if not std_df.empty:
-                        st.markdown("#### 📊 差が大きいカラム トップ20")
-                        fig_std, ax_std = plt.subplots(figsize=(10, max(4, len(std_df.head(20))*0.4)))
-                        sns.barplot(data=std_df.head(20), x="目的変数との差", y="カラム名", palette="magma", ax=ax_std)
-                        ax_std.set_title(f"目的変数「{target_col}」との標準偏差の差 (Top 20)", fontsize=12)
+                    display_std_df = std_df.head(top_n)
+                    
+                    # ★抽出された行（レコード）だけを表に表示
+                    st.dataframe(display_std_df, use_container_width=True)
+                    
+                    if not display_std_df.empty:
+                        fig_std, ax_std = plt.subplots(figsize=(10, max(4, len(display_std_df)*0.4)))
+                        sns.barplot(data=display_std_df, x="目的変数との差", y="カラム名", palette="magma", ax=ax_std)
+                        ax_std.set_title(f"目的変数「{target_col}」との標準偏差の差 (Top {top_n})", fontsize=12)
                         ax_std.set_xlabel("標準偏差の差 (絶対値)")
                         fig_std.tight_layout()
                         st.pyplot(fig_std)
