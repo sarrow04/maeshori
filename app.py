@@ -964,13 +964,10 @@ with col_view:
                     
                     std_df = pd.DataFrame(std_results).sort_values("目的変数との差", ascending=False)
                     
-                    # ★ここでユーザーが自由に抽出行数を選べるように変更
                     top_n = st.number_input("抽出・表示する件数 (上位N件)", min_value=5, max_value=100, value=20, step=5)
                     st.markdown(f"#### 📊 差が大きいカラム トップ {top_n}")
                     
                     display_std_df = std_df.head(top_n)
-                    
-                    # ★抽出された行（レコード）だけを表に表示
                     st.dataframe(display_std_df, use_container_width=True)
                     
                     if not display_std_df.empty:
@@ -980,5 +977,36 @@ with col_view:
                         ax_std.set_xlabel("標準偏差の差 (絶対値)")
                         fig_std.tight_layout()
                         st.pyplot(fig_std)
+                        
+                    # ★今回追加：異常値・極端な値の深掘りセクション
+                    st.divider()
+                    st.markdown("### 🔍 異常値・極端な値の深掘り (トップ6行抽出)")
+                    st.write("ランキング表からカラムを選択すると、その値が極端に大きい上位6行を抽出し、他の特徴量とどのような違いがあるか横並びで細かく比較できます。")
+                    
+                    deepdive_col = st.selectbox("詳細を確認したいカラムを選択してください", std_df["カラム名"].tolist())
+                    
+                    if deepdive_col:
+                        # 抽出とエラー防止
+                        temp_df = target_df.copy()
+                        temp_df[deepdive_col] = pd.to_numeric(temp_df[deepdive_col], errors="coerce")
+                        
+                        # 値が大きい上位6件を取得
+                        top6_df = temp_df.nlargest(6, deepdive_col)
+                        
+                        # 比較しやすいように「目的変数」と「選択したカラム」を左側に持ってくる
+                        all_columns = top6_df.columns.tolist()
+                        front_cols = []
+                        if target_col in all_columns:
+                            front_cols.append(target_col)
+                        if deepdive_col in all_columns:
+                            front_cols.append(deepdive_col)
+                            
+                        other_cols = [c for c in all_columns if c not in front_cols and c != "_source_"]
+                        
+                        # 並び替えて表示
+                        top6_df_ordered = top6_df[front_cols + other_cols]
+                        st.markdown(f"**「{deepdive_col}」の値が大きい上位6行**")
+                        st.dataframe(top6_df_ordered, use_container_width=True)
+                        
                 except Exception as e:
                     st.error(f"計算時にエラーが発生しました: {e}")
