@@ -6,6 +6,7 @@ import seaborn as sns
 import re
 import io
 import zipfile
+import itertools  # ★総当たり処理用に新規追加
 
 # グラフの日本語文字化け対策（インストールされている場合のみ適用）
 try:
@@ -236,6 +237,7 @@ with col_ctrl:
 
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
+        current_num_cols = get_numeric_columns(st.session_state.df) # ★数値カラムのリストを取得
         default_target = next((c for c in TARGET_CANDIDATES if c in df_cols), df_cols[0])
         
         st.markdown("<br>", unsafe_allow_html=True)
@@ -307,6 +309,7 @@ with col_ctrl:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
                     "【集約】カテゴリごとの平均値などを算出 (複数選択可)",
+                    "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)", # ★新規追加
                     "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", 
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)",
@@ -315,7 +318,7 @@ with col_ctrl:
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
                     "【変換】数値のビン分割 (10分割)",
                     "【時系列】日付列から年・月・日・曜日を抽出",  
-                    "【時系列】過去の値を取得 (ラグ特徴量)", # ★新規追加
+                    "【時系列】過去の値を取得 (ラグ特徴量)",
                     "【時系列】日付のフォーマット変換", 
                     "【抽出】「徒歩〇分」から最短分数を抽出", 
                     "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)", 
@@ -340,6 +343,7 @@ with col_ctrl:
                 fe_group_suffix = "代"
                 fe_lag_n = 1
                 fe_lag_group = "(なし)"
+                fe_auto_cols = []
 
                 if fe_method == "【時系列】日付のフォーマット変換":
                     date_format = st.selectbox("変換後のフォーマット", [
@@ -349,6 +353,9 @@ with col_ctrl:
                         "yyyy/MM/dd (例: 2014/01/05)",
                         "yyyyMMdd (例: 20140105)"
                     ])
+                elif fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
+                    st.info("💡 選択した列のすべての組み合わせで割り算(➗)の特徴量を自動生成します。(A÷B と B÷A の両方)")
+                    fe_auto_cols = st.multiselect("総当たり計算に使う列を選択 (複数可)", current_num_cols, default=current_num_cols[:min(5, len(current_num_cols))])
                 elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
@@ -374,7 +381,7 @@ with col_ctrl:
                 elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
-                        fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + get_numeric_columns(st.session_state.df))
+                        fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + current_num_cols)
                     with col4_2:
                         fe_aggs = st.multiselect("集計方法 (複数選択可)", ["mean", "median", "sum", "std", "max", "min", "count"], default=["mean"])
 
@@ -568,7 +575,22 @@ with col_ctrl:
                 # -------------------------
                 # STEP3: その他の特徴量作成
                 # -------------------------
-                if fe_column != "(なし)" and fe_method != "何もしない":
+                # ★自動生成（総当たり）は fe_column が「何もしない」や「(なし)」でも実行できるよう独立させる
+                if fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
+                    if len(fe_auto_cols) >= 2:
+                        count_added = 0
+                        pfx = f"{fe_prefix.strip()}_" if fe_prefix.strip() else ""
+                        for c1, c2 in itertools.permutations(fe_auto_cols, 2):
+                            s1 = pd.to_numeric(df[c1], errors="coerce")
+                            s2 = pd.to_numeric(df[c2], errors="coerce")
+                            # 0除算を回避しつつ割り算（➗）
+                            df[f"{pfx}{c1}÷{c2}"] = np.where(s2 == 0, np.nan, s1 / s2)
+                            count_added += 1
+                        log.append(f"特徴量一括追加：{len(fe_auto_cols)}列の総当たり割り算(➗)を実行（計{count_added}列追加）")
+                    else:
+                        st.warning("総当たり計算には、2つ以上の列を選択してください。")
+
+                elif fe_column != "(なし)" and fe_method != "何もしない":
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
                     
@@ -791,7 +813,7 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★標準偏差のタブを削除し、全5タブに変更
+        # ★全5タブの構成
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "🌳 特徴量重要度 (AI判定)"])
         
         with view_tabs[0]:
