@@ -978,23 +978,39 @@ with col_view:
                         fig_std.tight_layout()
                         st.pyplot(fig_std)
                         
-                    # ★今回追加：異常値・極端な値の深掘りセクション
+                    # ★今回追加：異常値・極端な値の深掘りセクション（散布図と可変テーブル）
                     st.divider()
-                    st.markdown("### 🔍 異常値・極端な値の深掘り (トップ6行抽出)")
-                    st.write("ランキング表からカラムを選択すると、その値が極端に大きい上位6行を抽出し、他の特徴量とどのような違いがあるか横並びで細かく比較できます。")
+                    st.markdown("### 🔍 異常値・極端な値の深掘り")
+                    st.write("ランキング表からカラムを選択すると、全体像を把握する**「散布図」**と、極端な値を持つ**「上位データの表」**を表示し、原因を細かく分析できます。")
                     
                     deepdive_col = st.selectbox("詳細を確認したいカラムを選択してください", std_df["カラム名"].tolist())
                     
                     if deepdive_col:
-                        # 抽出とエラー防止
                         temp_df = target_df.copy()
                         temp_df[deepdive_col] = pd.to_numeric(temp_df[deepdive_col], errors="coerce")
+                        temp_df[target_col] = pd.to_numeric(temp_df[target_col], errors="coerce")
                         
-                        # 値が大きい上位6件を取得
-                        top6_df = temp_df.nlargest(6, deepdive_col)
+                        # 1. 散布図の描画
+                        st.markdown(f"#### 📊 「{deepdive_col}」と「{target_col}」の関係性 (散布図)")
+                        st.write("右端に離れた点（極端な値）が、目的変数に対してどのような影響を与えているかを視覚的に確認します。赤い線はデータ全体のトレンド（傾向）を示します。")
+                        
+                        fig_scat, ax_scat = plt.subplots(figsize=(8, 5))
+                        sns.regplot(data=temp_df, x=deepdive_col, y=target_col, 
+                                    scatter_kws={'alpha':0.5, 'color':'#1f77b4'}, 
+                                    line_kws={'color':'red'}, ax=ax_scat)
+                        ax_scat.set_title(f"{deepdive_col} vs {target_col} の散布図", fontsize=12)
+                        fig_scat.tight_layout()
+                        st.pyplot(fig_scat)
+                        
+                        # 2. テーブル抽出
+                        st.markdown(f"#### 📋 「{deepdive_col}」の極端な値ランキング")
+                        table_k = st.slider("表に抽出・表示する件数", min_value=3, max_value=50, value=10, step=1)
+                        
+                        # 値が大きい上位N件を取得
+                        top_k_df = temp_df.nlargest(table_k, deepdive_col)
                         
                         # 比較しやすいように「目的変数」と「選択したカラム」を左側に持ってくる
-                        all_columns = top6_df.columns.tolist()
+                        all_columns = top_k_df.columns.tolist()
                         front_cols = []
                         if target_col in all_columns:
                             front_cols.append(target_col)
@@ -1004,9 +1020,8 @@ with col_view:
                         other_cols = [c for c in all_columns if c not in front_cols and c != "_source_"]
                         
                         # 並び替えて表示
-                        top6_df_ordered = top6_df[front_cols + other_cols]
-                        st.markdown(f"**「{deepdive_col}」の値が大きい上位6行**")
-                        st.dataframe(top6_df_ordered, use_container_width=True)
+                        top_k_df_ordered = top_k_df[front_cols + other_cols]
+                        st.dataframe(top_k_df_ordered, use_container_width=True)
                         
                 except Exception as e:
                     st.error(f"計算時にエラーが発生しました: {e}")
