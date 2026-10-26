@@ -6,7 +6,7 @@ import seaborn as sns
 import re
 import io
 import zipfile
-import itertools  # ★総当たり処理用に新規追加
+import itertools
 
 # グラフの日本語文字化け対策（インストールされている場合のみ適用）
 try:
@@ -237,13 +237,22 @@ with col_ctrl:
 
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
-        current_num_cols = get_numeric_columns(st.session_state.df) # ★数値カラムのリストを取得
+        current_num_cols = get_numeric_columns(st.session_state.df) 
         default_target = next((c for c in TARGET_CANDIDATES if c in df_cols), df_cols[0])
         
         st.markdown("<br>", unsafe_allow_html=True)
         st.write("---")
         st.subheader("🛠 前処理ワークフロー（STEP1 〜 4）")
+        
+        # 🎯 目的変数の選択
         target_col = st.selectbox("🎯 目的変数（削除や補完から除外して守る列）", ["(なし)"] + df_cols, index=df_cols.index(default_target)+1 if default_target in df_cols else 0)
+
+        # ★【追加】データリーク防止のための安全ロック（目的変数を特徴量生成の選択肢から完全に除外する）
+        safe_df_cols = [c for c in df_cols if c != target_col]
+        safe_num_cols = [c for c in current_num_cols if c != target_col]
+        
+        if target_col != "(なし)":
+            st.success(f"🔒 **【安全ロック作動中】** 目的変数「{target_col}」は、データリーク（過学習）を防ぐため、以下の特徴量生成メニューの選択肢から自動的に除外されています。")
 
         # ----------------------------------------------------------------
         # STEP1: 文字列の処理 (分割 / ダミー化)
@@ -257,7 +266,7 @@ with col_ctrl:
                 st.markdown("##### ✂️ 記号や空白で文字をバラバラにして列を分ける")
                 c1, c2 = st.columns([5, 5])
                 with c1:
-                    split_col_step1 = st.selectbox("分割する列", ["(なし)"] + df_cols, key="split_col_step1")
+                    split_col_step1 = st.selectbox("分割する列", ["(なし)"] + safe_df_cols, key="split_col_step1")
                     split_strategy = st.radio("分割の方式", ["単語ごとに専用列を作成 (ズレ完全防止・推奨)", "左詰めで分割 (最大N列指定)"])
                     if split_strategy == "左詰めで分割 (最大N列指定)":
                         split_max = st.number_input("最大何列に分けるか", min_value=2, max_value=50, value=5)
@@ -270,14 +279,14 @@ with col_ctrl:
                 st.markdown("##### 🔄 複数キーワードの一括フラグ化")
                 c1, c2 = st.columns([6, 4])
                 with c1:
-                    ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + df_cols, key="ml_col")
+                    ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + safe_df_cols, key="ml_col")
                 with c2:
                     ml_delim = st.text_input("区切り文字 (「／」や「空白」)", value="／", key="ml_delim")
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除する", value=True, key="ml_drop")
                 
                 st.divider()
                 st.markdown("##### 🔄 通常のカテゴリダミー化 (One-Hot)")
-                onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を複数選択", df_cols)
+                onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を複数選択", safe_df_cols)
 
         # ----------------------------------------------------------------
         # STEP2: 基本処理
@@ -292,8 +301,8 @@ with col_ctrl:
             st.markdown("##### 📝 セル内文字の微調整 (置換・抽出)")
             c1, c2 = st.columns(2)
             with c1:
-                replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + df_cols, key="replace_col")
-                extract_column = st.selectbox("特定の文字だけ残す(抽出)列", ["(なし)"] + df_cols, key="extract_col")
+                replace_column = st.selectbox("一部の文字を消す列", ["(なし)"] + safe_df_cols, key="replace_col")
+                extract_column = st.selectbox("特定の文字だけ残す(抽出)列", ["(なし)"] + safe_df_cols, key="extract_col")
             with c2:
                 remove_text = st.text_input("消したい文字 (カンマ区切り可)")
                 extract_text = st.text_input("残したい文字 (カンマ区切り可)")
@@ -304,12 +313,12 @@ with col_ctrl:
         with st.expander("✨ STEP3: その他の特徴量作成 (時系列・数値・集約など)", expanded=True):
             c1, c2 = st.columns([4, 6])
             with c1:
-                fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + df_cols)
+                fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + safe_df_cols)
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
                     "【集約】カテゴリごとの平均値などを算出 (複数選択可)",
-                    "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)", # ★新規追加
+                    "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)", 
                     "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", 
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)",
@@ -355,13 +364,13 @@ with col_ctrl:
                     ])
                 elif fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
                     st.info("💡 選択した列のすべての組み合わせで割り算(➗)の特徴量を自動生成します。(A÷B と B÷A の両方)")
-                    fe_auto_cols = st.multiselect("総当たり計算に使う列を選択 (複数可)", current_num_cols, default=current_num_cols[:min(5, len(current_num_cols))])
+                    fe_auto_cols = st.multiselect("総当たり計算に使う列を選択 (複数可)", safe_num_cols, default=safe_num_cols[:min(5, len(safe_num_cols))])
                 elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
                         fe_lag_n = st.number_input("何行前の値を取得するか(ラグ数)", min_value=1, max_value=365, value=1, help="例: 1日前なら「1」、7日前なら「7」")
                     with col4_2:
-                        fe_lag_group = st.selectbox("グループ化してラグを取る列 (任意)", ["(なし)"] + df_cols, help="店舗別やメニュー別に過去の値を取りたい場合に指定します。")
+                        fe_lag_group = st.selectbox("グループ化してラグを取る列 (任意)", ["(なし)"] + safe_df_cols, help="店舗別やメニュー別に過去の値を取りたい場合に指定します。")
                 elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
                     st.info("💡 category型を保存するには、ダウンロード時に「Parquet形式」を選んでください。（CSV形式だと文字列に戻ってしまいます）")
                 elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
@@ -377,11 +386,11 @@ with col_ctrl:
                     with col4_1:
                         fe_op = st.radio("計算記号", ["+", "-", "×", "÷"], horizontal=True)
                     with col4_2:
-                        fe_col2 = st.selectbox("計算する2つ目の列", df_cols)
+                        fe_col2 = st.selectbox("計算する2つ目の列", safe_df_cols)
                 elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
-                        fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + current_num_cols)
+                        fe_num_col = st.selectbox("集計する数値列 (例: y, 売上)", ["(なし)"] + safe_num_cols)
                     with col4_2:
                         fe_aggs = st.multiselect("集計方法 (複数選択可)", ["mean", "median", "sum", "std", "max", "min", "count"], default=["mean"])
 
@@ -398,13 +407,13 @@ with col_ctrl:
 
             st.divider()
             st.markdown("##### 🗑 手動で選んで削除")
-            drop_columns = st.multiselect("リストから選択", df_cols)
+            drop_columns = st.multiselect("リストから選択", safe_df_cols)
 
             st.divider()
             st.markdown("##### 🎯 数値の範囲でフィルタ (行の削除)")
             c1, c2 = st.columns(2)
             with c1: 
-                range_column = st.selectbox("数値フィルタ列 (指定範囲外を削除)", ["(なし)"] + df_cols)
+                range_column = st.selectbox("数値フィルタ列 (指定範囲外を削除)", ["(なし)"] + safe_df_cols)
             with c2: 
                 min_value = st.text_input("残す最小値")
                 max_value = st.text_input("残す最大値")
@@ -575,7 +584,6 @@ with col_ctrl:
                 # -------------------------
                 # STEP3: その他の特徴量作成
                 # -------------------------
-                # ★自動生成（総当たり）は fe_column が「何もしない」や「(なし)」でも実行できるよう独立させる
                 if fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
                     if len(fe_auto_cols) >= 2:
                         count_added = 0
@@ -583,7 +591,6 @@ with col_ctrl:
                         for c1, c2 in itertools.permutations(fe_auto_cols, 2):
                             s1 = pd.to_numeric(df[c1], errors="coerce")
                             s2 = pd.to_numeric(df[c2], errors="coerce")
-                            # 0除算を回避しつつ割り算（➗）
                             df[f"{pfx}{c1}÷{c2}"] = np.where(s2 == 0, np.nan, s1 / s2)
                             count_added += 1
                         log.append(f"特徴量一括追加：{len(fe_auto_cols)}列の総当たり割り算(➗)を実行（計{count_added}列追加）")
@@ -813,7 +820,6 @@ with col_view:
         
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★全5タブの構成
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "🌳 特徴量重要度 (AI判定)"])
         
         with view_tabs[0]:
