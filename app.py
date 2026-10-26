@@ -247,12 +247,12 @@ with col_ctrl:
         # 🎯 目的変数の選択
         target_col = st.selectbox("🎯 目的変数（削除や補完から除外して守る列）", ["(なし)"] + df_cols, index=df_cols.index(default_target)+1 if default_target in df_cols else 0)
 
-        # ★【追加】データリーク防止のための安全ロック（目的変数を特徴量生成の選択肢から完全に除外する）
+        # データリーク防止のための安全ロック
         safe_df_cols = [c for c in df_cols if c != target_col]
         safe_num_cols = [c for c in current_num_cols if c != target_col]
         
         if target_col != "(なし)":
-            st.success(f"🔒 **【安全ロック作動中】** 目的変数「{target_col}」は、データリーク（過学習）を防ぐため、以下の特徴量生成メニューの選択肢から自動的に除外されています。")
+            st.success(f"🔒 **【安全ロック作動中】** 目的変数「{target_col}」は、データリーク（過学習）を防ぐため「ラグ特徴量」以外の生成メニューからは自動的に除外されています。")
 
         # ----------------------------------------------------------------
         # STEP1: 文字列の処理 (分割 / ダミー化)
@@ -312,8 +312,8 @@ with col_ctrl:
         # ----------------------------------------------------------------
         with st.expander("✨ STEP3: その他の特徴量作成 (時系列・数値・集約など)", expanded=True):
             c1, c2 = st.columns([4, 6])
-            with c1:
-                fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + safe_df_cols)
+            
+            # ★先に右側(c2)でメソッドを選ばせることで、左側(c1)のリストを動的に変更する
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
@@ -337,6 +337,11 @@ with col_ctrl:
                     "【フラグ】キーワード有無フラグ"
                 ])
             
+            with c1:
+                # ★処理が「ラグ」のときだけ、ロックを解除して目的変数(df_cols全体)を選べるようにする
+                allowed_cols = df_cols if fe_method == "【時系列】過去の値を取得 (ラグ特徴量)" else safe_df_cols
+                fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + allowed_cols)
+                
             c3, c4 = st.columns([4, 6])
             with c3:
                 fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)", placeholder="例: feat")
@@ -366,6 +371,7 @@ with col_ctrl:
                     st.info("💡 選択した列のすべての組み合わせで割り算(➗)の特徴量を自動生成します。(A÷B と B÷A の両方)")
                     fe_auto_cols = st.multiselect("総当たり計算に使う列を選択 (複数可)", safe_num_cols, default=safe_num_cols[:min(5, len(safe_num_cols))])
                 elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
+                    st.info("💡 事前にデータが古い順（日付順）に並んでいることが前提です。")
                     col4_1, col4_2 = st.columns(2)
                     with col4_1:
                         fe_lag_n = st.number_input("何行前の値を取得するか(ラグ数)", min_value=1, max_value=365, value=1, help="例: 1日前なら「1」、7日前なら「7」")
@@ -531,7 +537,7 @@ with col_ctrl:
                         if col != target and df[col].isna().any():
                             train_median = df[df["_source_"] == "train"][col].median() if "train" in df["_source_"].values else df[col].median()
                             df[col] = df[col].fillna(train_median)
-                    log.append("欠損値補完：数値列を補完（Trainの中央値を使用）")
+                    log.append("欠 মোক値補完：数値列を補完（Trainの中央値を使用）")
                 elif missing_action == "欠損行を削除":
                     if target:
                         before_len = len(df)
