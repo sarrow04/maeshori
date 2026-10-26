@@ -244,10 +244,8 @@ with col_ctrl:
         st.write("---")
         st.subheader("🛠 前処理ワークフロー（STEP1 〜 4）")
         
-        # 🎯 目的変数の選択
         target_col = st.selectbox("🎯 目的変数（削除や補完から除外して守る列）", ["(なし)"] + df_cols, index=df_cols.index(default_target)+1 if default_target in df_cols else 0)
 
-        # データリーク防止のための安全ロック
         safe_df_cols = [c for c in df_cols if c != target_col]
         safe_num_cols = [c for c in current_num_cols if c != target_col]
         
@@ -255,12 +253,10 @@ with col_ctrl:
             st.success(f"🔒 **【安全ロック作動中】** 目的変数「{target_col}」は、データリーク（過学習）を防ぐため「ラグ特徴量」以外の生成メニューからは自動的に除外されています。")
 
         # ----------------------------------------------------------------
-        # STEP1: 文字列の処理 (分割 / ダミー化)
+        # STEP1: 文字列の処理 (分割 / ダミー化 / ID化)
         # ----------------------------------------------------------------
-        with st.expander("🪄 STEP1: 複雑な文字列の処理 (分割 / ダミー化) 🌟", expanded=True):
-            st.info("💡 LightGBMなどを使うために「文字列のまま分割して残す」か、線形モデル等のために「0と1のフラグに変換する」かを選べます。")
-            
-            tab1, tab2 = st.tabs(["✂️ 文字列のまま複数列に分割 (LightGBM向け)", "🔄 0/1のフラグ列に変換 (ダミー化)"])
+        with st.expander("🪄 STEP1: 複雑な文字列の処理 (分割 / ダミー化 / ID化) 🌟", expanded=True):
+            tab1, tab2 = st.tabs(["✂️ 文字列のまま複数列に分割", "🔄 カテゴリの数値化 (ID化 / ダミー化)"])
             
             with tab1:
                 st.markdown("##### ✂️ 記号や空白で文字をバラバラにして列を分ける")
@@ -276,11 +272,24 @@ with col_ctrl:
                     split_drop_step1 = st.checkbox("処理後に元の列を削除する", value=True, key="split_drop_step1")
             
             with tab2:
+                st.markdown("##### 🔢 カテゴリの一括数値ID化 (Label Encoding - 決定木推奨)")
+                st.info("💡 LightGBMなどの決定木モデルを使う場合、すべての文字データをこの機能でID化するのが一番簡単で効果的です。")
+                le_auto_all = st.checkbox("🪄 すべての文字カラムを全自動で数値IDに変換する", value=False)
+                
+                if not le_auto_all:
+                    le_columns = st.multiselect("ID化する列を手動で選択", safe_df_cols)
+                else:
+                    le_columns = []
+                    
+                le_drop = st.checkbox("ID化の処理後、元の文字カラムを自動で削除する", value=True, key="le_drop")
+                
+                st.divider()
+
                 st.markdown("##### 🔄 複数キーワードの一括フラグ化")
-                c1, c2 = st.columns([6, 4])
-                with c1:
+                c1_2, c2_2 = st.columns([6, 4])
+                with c1_2:
                     ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + safe_df_cols, key="ml_col")
-                with c2:
+                with c2_2:
                     ml_delim = st.text_input("区切り文字 (「／」や「空白」)", value="／", key="ml_delim")
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除する", value=True, key="ml_drop")
                 
@@ -313,7 +322,6 @@ with col_ctrl:
         with st.expander("✨ STEP3: その他の特徴量作成 (時系列・数値・集約など)", expanded=True):
             c1, c2 = st.columns([4, 6])
             
-            # ★先に右側(c2)でメソッドを選ばせることで、左側(c1)のリストを動的に変更する
             with c2:
                 fe_method = st.selectbox("処理方法を選択", [
                     "何もしない", 
@@ -338,7 +346,6 @@ with col_ctrl:
                 ])
             
             with c1:
-                # ★処理が「ラグ」のときだけ、ロックを解除して目的変数(df_cols全体)を選べるようにする
                 allowed_cols = df_cols if fe_method == "【時系列】過去の値を取得 (ラグ特徴量)" else safe_df_cols
                 fe_column = st.selectbox("基準となる列（元データ）", ["(なし)"] + allowed_cols)
                 
@@ -368,7 +375,7 @@ with col_ctrl:
                         "yyyyMMdd (例: 20140105)"
                     ])
                 elif fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
-                    st.info("💡 選択した列のすべての組み合わせで割り算(➗)の特徴量を自動生成します。(A÷B と B÷A の両方)")
+                    st.info("💡 選択した列のすべての組み合わせで割り算(➗)の特徴量を自動生成します。(A÷B と B÷A 両方)")
                     fe_auto_cols = st.multiselect("総当たり計算に使う列を選択 (複数可)", safe_num_cols, default=safe_num_cols[:min(5, len(safe_num_cols))])
                 elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
                     st.info("💡 事前にデータが古い順（日付順）に並んでいることが前提です。")
@@ -436,7 +443,7 @@ with col_ctrl:
                 target = target_col if target_col != "(なし)" else None
 
                 # -------------------------
-                # STEP1: 分割 ＆ フラグ化
+                # STEP1: 分割 ＆ フラグ化 ＆ ID化
                 # -------------------------
                 if split_col_step1 != "(なし)":
                     prefix = f"{split_col_step1}_分割"
@@ -523,6 +530,26 @@ with col_ctrl:
                     df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
                     log.append(f"🔄 One-Hot変換：{', '.join(onehot_columns)} を変換")
 
+                # ★追加：一括ID化ロジック (Label Encoding)
+                le_target_cols = set()
+                if le_auto_all:
+                    # 最新の状態（分割などで増えた列も含む）の文字カラムを取得
+                    text_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+                    le_target_cols.update([c for c in text_cols if c not in [target, "_source_"]])
+                if le_columns:
+                    le_target_cols.update([c for c in le_columns if c in df.columns])
+                    
+                le_target_cols = list(le_target_cols)
+                if le_target_cols:
+                    count_le = 0
+                    for c in le_target_cols:
+                        codes, uniques = pd.factorize(df[c])
+                        df[f"{c}_ID"] = np.where(pd.isna(df[c]), np.nan, codes)
+                        if le_drop and c in df.columns:
+                            df = df.drop(columns=[c])
+                        count_le += 1
+                    log.append(f"🔢 一括数値ID化：{count_le}列を数値ID(Label Encoding)に変換（元データ削除: {'ON' if le_drop else 'OFF'}）")
+
                 # -------------------------
                 # STEP2: 基本処理
                 # -------------------------
@@ -537,7 +564,7 @@ with col_ctrl:
                         if col != target and df[col].isna().any():
                             train_median = df[df["_source_"] == "train"][col].median() if "train" in df["_source_"].values else df[col].median()
                             df[col] = df[col].fillna(train_median)
-                    log.append("欠 মোক値補完：数値列を補完（Trainの中央値を使用）")
+                    log.append("欠損値補完：数値列を補完（Trainの中央値を使用）")
                 elif missing_action == "欠損行を削除":
                     if target:
                         before_len = len(df)
@@ -566,7 +593,8 @@ with col_ctrl:
                 if replace_column != "(なし)" and remove_text.strip():
                     remove_words = [w.strip() for w in remove_text.split(",") if w.strip()]
                     for word in remove_words:
-                        df[replace_column] = df[replace_column].astype(str).str.replace(word, "", regex=False)
+                        if replace_column in df.columns:
+                            df[replace_column] = df[replace_column].astype(str).str.replace(word, "", regex=False)
                     log.append(f"セル内文字消去：{replace_column} から '{', '.join(remove_words)}' を消去")
 
                 if extract_column != "(なし)" and extract_text.strip():
@@ -584,8 +612,9 @@ with col_ctrl:
                                     res.append(m)
                             return ",".join(res)
                         return np.nan
-                    df[extract_column] = df[extract_column].apply(extract_match)
-                    log.append(f"文字抽出：{extract_column} に '{', '.join(extract_words)}' のみを残す")
+                    if extract_column in df.columns:
+                        df[extract_column] = df[extract_column].apply(extract_match)
+                        log.append(f"文字抽出：{extract_column} に '{', '.join(extract_words)}' のみを残す")
 
                 # -------------------------
                 # STEP3: その他の特徴量作成
@@ -594,16 +623,18 @@ with col_ctrl:
                     if len(fe_auto_cols) >= 2:
                         count_added = 0
                         pfx = f"{fe_prefix.strip()}_" if fe_prefix.strip() else ""
-                        for c1, c2 in itertools.permutations(fe_auto_cols, 2):
+                        
+                        valid_auto_cols = [c for c in fe_auto_cols if c in df.columns]
+                        for c1, c2 in itertools.permutations(valid_auto_cols, 2):
                             s1 = pd.to_numeric(df[c1], errors="coerce")
                             s2 = pd.to_numeric(df[c2], errors="coerce")
                             df[f"{pfx}{c1}÷{c2}"] = np.where(s2 == 0, np.nan, s1 / s2)
                             count_added += 1
-                        log.append(f"特徴量一括追加：{len(fe_auto_cols)}列の総当たり割り算(➗)を実行（計{count_added}列追加）")
+                        log.append(f"特徴量一括追加：{len(valid_auto_cols)}列の総当たり割り算(➗)を実行（計{count_added}列追加）")
                     else:
                         st.warning("総当たり計算には、2つ以上の列を選択してください。")
 
-                elif fe_column != "(なし)" and fe_method != "何もしない":
+                elif fe_column != "(なし)" and fe_method != "何もしない" and fe_column in df.columns:
                     source = df[fe_column]
                     prefix = fe_prefix.strip() or f"{fe_column}"
                     
@@ -641,7 +672,7 @@ with col_ctrl:
                         log.append(f"特徴量追加：{fe_column} から「年」「月」「日」「曜日」をそれぞれ抽出")
                         
                     elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
-                        if fe_lag_group != "(なし)":
+                        if fe_lag_group != "(なし)" and fe_lag_group in df.columns:
                             df[f"{prefix}_{fe_lag_group}別_{fe_lag_n}ラグ"] = df.groupby(fe_lag_group)[fe_column].shift(fe_lag_n)
                             log.append(f"特徴量追加：{fe_lag_group}ごとに {fe_column} の {fe_lag_n}行前(ラグ)を取得")
                         else:
@@ -668,7 +699,7 @@ with col_ctrl:
                         log.append(f"フォーマット変換：{fe_column} を「{date_format.split(' ')[0]}」形式に変換")
 
                     elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
-                        if fe_col2 and fe_col2 != "(なし)":
+                        if fe_col2 and fe_col2 != "(なし)" and fe_col2 in df.columns:
                             s1 = pd.to_numeric(df[fe_column], errors="coerce")
                             s2 = pd.to_numeric(df[fe_col2], errors="coerce")
                             op_name = {"+": "和", "-": "差", "×": "積", "÷": "商"}[fe_op]
@@ -680,7 +711,7 @@ with col_ctrl:
                             log.append(f"特徴量追加：{fe_column} と {fe_col2} の四則演算({fe_op})")
 
                     elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
-                        if fe_num_col and fe_num_col != "(なし)" and len(fe_aggs) > 0:
+                        if fe_num_col and fe_num_col != "(なし)" and fe_num_col in df.columns and len(fe_aggs) > 0:
                             num_series = pd.to_numeric(df[fe_num_col], errors="coerce")
                             temp_df = pd.DataFrame({"cat": df[fe_column], "num": num_series, "src": df.get("_source_", "single")})
                             
@@ -1040,6 +1071,24 @@ with col_view:
                                     ax_imp.set_title(f"「{target_col}」に対する特徴量重要度 (Top 20)", fontsize=12)
                                     fig_imp.tight_layout()
                                     st.pyplot(fig_imp)
+                                
+                                st.divider()
+                                st.markdown("### ✂️ ワンクリック自動整理 (手作業での削除は不要です！)")
+                                st.write("上記のランキングをもとに、AIが本当に重視した上位の特徴量だけを残し、下位の不要なカラムを一括で自動削除します。")
+                                
+                                keep_n = st.slider("残す上位特徴量の数を選択してください", min_value=1, max_value=len(importance_df), value=min(20, len(importance_df)))
+                                
+                                if st.button(f"🗑 上位 {keep_n} 件だけを残して、残りの不要なカラムを自動削除する", type="primary", use_container_width=True):
+                                    keep_cols = importance_df.head(keep_n)["特徴量"].tolist()
+                                    safe_keep = set(keep_cols + [target_col, "_source_"])
+                                    drop_cols = [c for c in target_df.columns if c not in safe_keep]
+                                    
+                                    new_df = target_df.drop(columns=drop_cols)
+                                    st.session_state.df = new_df
+                                    st.session_state.processed_df = None
+                                    st.session_state.logs.append(f"🤖 AI自動整理: 上位{keep_n}件の特徴量を残し、不要な{len(drop_cols)}列を削除しました")
+                                    
+                                    st.rerun()
                                     
                         except ImportError:
                             st.error("⚠️ `lightgbm` ライブラリがインストールされていません。ターミナルで `pip install lightgbm` を実行してから再度お試しください。")
