@@ -106,8 +106,8 @@ with col_ctrl:
             if st.button("🔄 最初からやり直す", use_container_width=True):
                 st.session_state.current_file_id = None; st.session_state.df = None; st.session_state.processed_df = None; st.rerun()
 
-    with st.container(border=True):
-        st.subheader("📂 0. データ読み込み")
+    # 💡 修正箇所：環境依存エラーを防ぎ、読み込み後は自動で閉じてスッキリさせる
+    with st.expander("📂 0. データ読み込み", expanded=(st.session_state.df is None)):
         read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 個別", "Train / Test まとめてZIP"], horizontal=True)
         
         if read_mode == "単一ファイル":
@@ -120,6 +120,7 @@ with col_ctrl:
                     st.session_state.df = fix_dataframe_for_streamlit(df)
                     st.session_state.original_size = uploaded_file.size; st.session_state.current_file_id = fid
                     st.session_state.processed_df = None; st.session_state.logs = []
+                    st.rerun()
                     
         elif read_mode == "Train / Test 個別":
             c1, c2 = st.columns(2)
@@ -133,6 +134,7 @@ with col_ctrl:
                     st.session_state.df = fix_dataframe_for_streamlit(pd.concat([train_df, test_df], axis=0, ignore_index=True))
                     st.session_state.original_size = train_file.size + test_file.size; st.session_state.current_file_id = fid
                     st.session_state.processed_df = None; st.session_state.logs = []
+                    st.rerun()
 
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
@@ -186,19 +188,19 @@ with col_ctrl:
                     "【変換】カテゴリを頻度（出現回数）に変換 (Count Encoding)", 
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)",
-                    "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)", # ★メニュー名
+                    "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
-                    "【変換】数値のビン分割 (10分割)", # ★復活
+                    "【変換】数値のビン分割 (10分割)",
                     "【時系列】カテゴリ別の過去実績(y)の平均 (ターゲットエンコーディング)",
                     "【時系列】過去の値を取得 (ラグ特徴量)",
                     "【時系列】日付列から年・月・日・曜日を抽出",  
                     "【時系列】日付のフォーマット変換", 
-                    "【抽出】「徒歩〇分」から最短分数を抽出", # ★復活
-                    "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)", # ★復活
-                    "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割", # ★復活
-                    "【抽出】最初の数値を抽出", # ★復活
-                    "【テキスト】文字数カウント", # ★復活
+                    "【抽出】「徒歩〇分」から最短分数を抽出",
+                    "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)",
+                    "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
+                    "【抽出】最初の数値を抽出",
+                    "【テキスト】文字数カウント",
                     "【フラグ】キーワード有無フラグ"
                 ])
             
@@ -295,7 +297,7 @@ with col_ctrl:
                             iqr = q3 - q1
                             df = df[~((df[col] < q1 - 1.5 * iqr) | (df[col] > q3 + 1.5 * iqr))]
 
-                # 🌟 【完全復活】STEP3 の実行ロジック
+                # STEP3 実行ロジック
                 if fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)":
                     pfx = f"{fe_prefix.strip()}_" if fe_prefix.strip() else ""
                     for c1, c2 in itertools.permutations([c for c in fe_auto_cols if c in df.columns], 2):
@@ -318,14 +320,12 @@ with col_ctrl:
                     elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
                         df[f"{prefix}_cat"] = source.astype("category")
                         
-                    # ★ 修正箇所：数値を安全に変換してから計算
                     elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
                         num_s = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_{fe_group_width}区切り"] = num_s.apply(
                             lambda val: f"{int(np.floor(val / fe_group_width) * fe_group_width)}{fe_group_suffix}" if pd.notna(val) else np.nan
                         )
                         
-                    # ★ 復活箇所：ビン分割
                     elif fe_method == "【変換】数値のビン分割 (10分割)":
                         num_s = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_s, q=10, labels=False, duplicates='drop')
@@ -365,7 +365,6 @@ with col_ctrl:
                         for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]:
                             df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
 
-                    # ★ 復活箇所：抽出系メニュー
                     elif fe_method == "【抽出】「徒歩〇分」から最短分数を抽出":
                         df[f"{prefix}_最短徒歩分"] = source.apply(lambda x: min(map(int, re.findall(r"徒歩\s*(\d+)\s*分?", str(x)))) if pd.notna(x) and re.findall(r"徒歩\s*(\d+)\s*分?", str(x)) else np.nan)
 
