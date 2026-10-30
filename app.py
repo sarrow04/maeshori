@@ -106,7 +106,6 @@ with col_ctrl:
             if st.button("🔄 最初からやり直す", use_container_width=True):
                 st.session_state.current_file_id = None; st.session_state.df = None; st.session_state.processed_df = None; st.rerun()
 
-    # 💡 修正箇所：環境依存エラーを防ぎ、読み込み後は自動で閉じてスッキリさせる
     with st.expander("📂 0. データ読み込み", expanded=(st.session_state.df is None)):
         read_mode = st.radio("読み込みモード", ["単一ファイル", "Train / Test 個別", "Train / Test まとめてZIP"], horizontal=True)
         
@@ -135,6 +134,30 @@ with col_ctrl:
                     st.session_state.original_size = train_file.size + test_file.size; st.session_state.current_file_id = fid
                     st.session_state.processed_df = None; st.session_state.logs = []
                     st.rerun()
+                    
+        # ★ 欠落していたZIP読み込み処理を完全復活！
+        elif read_mode == "Train / Test まとめてZIP":
+            uploaded_zip = st.file_uploader("ZIPファイルをアップロード (.zip)")
+            if uploaded_zip:
+                fid = f"zip_{uploaded_zip.name}_{uploaded_zip.size}"
+                if st.session_state.current_file_id != fid:
+                    try:
+                        with zipfile.ZipFile(uploaded_zip, 'r') as z:
+                            file_list = z.namelist()
+                            train_name = next((f for f in file_list if 'train' in f.lower() and not f.endswith('/')), None)
+                            test_name = next((f for f in file_list if 'test' in f.lower() and not f.endswith('/')), None)
+                            if train_name and test_name:
+                                train_df = read_file_safely(io.BytesIO(z.read(train_name)), train_name)
+                                test_df = read_file_safely(io.BytesIO(z.read(test_name)), test_name)
+                                train_df["_source_"] = "train"; test_df["_source_"] = "test"
+                                st.session_state.df = fix_dataframe_for_streamlit(pd.concat([train_df, test_df], axis=0, ignore_index=True))
+                                st.session_state.original_size = uploaded_zip.size; st.session_state.current_file_id = fid
+                                st.session_state.processed_df = None; st.session_state.logs = []
+                                st.rerun()
+                            else:
+                                st.error("ZIPファイルの中に 'train' と 'test' を含むファイルが見つかりませんでした。")
+                    except Exception as e:
+                        st.error(f"ZIPファイルの読み込みに失敗しました: {e}")
 
     if st.session_state.df is not None:
         df_cols = [c for c in st.session_state.df.columns.tolist() if c != "_source_"]
