@@ -172,7 +172,7 @@ with col_ctrl:
         continuous_num_cols = [c for c in safe_num_cols if not str(c).endswith('_ID')]
         
         with st.expander("🪄 STEP1: 複雑な文字列の処理", expanded=True):
-            tab1, tab2 = st.tabs(["✂️ 複数列に分割", "🔄 カテゴリ処理 (型変換/ID化)"])
+            tab1, tab2 = st.tabs(["✂️ 複数列に分割", "🔄 カテゴリ処理 (型変換/ID化/ダミー化)"])
             with tab1:
                 c1, c2 = st.columns([5, 5])
                 with c1:
@@ -183,9 +183,7 @@ with col_ctrl:
                     split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)")
                     split_drop_step1 = st.checkbox("処理後に元の列を削除", value=True)
             with tab2:
-                # ★ NEW: 一括 category 型変換メニュー
                 st.markdown("##### 🅰️ カテゴリ型 (category) への一括変換 (LightGBM推奨)")
-                st.info("💡 文字をわざわざID化(0,1,2...)しなくても、category型にするだけでLightGBMが高精度に学習できます。（※保存形式はParquet推奨）")
                 cat_auto_all = st.checkbox("🪄 すべての文字カラムを category 型に変換", value=False)
                 cat_columns = [] if cat_auto_all else st.multiselect("category型にする列", safe_df_cols)
                 
@@ -193,16 +191,25 @@ with col_ctrl:
                 st.markdown("##### 🔢 カテゴリの一括数値ID化 (Label Encoding)")
                 le_auto_all = st.checkbox("🪄 すべての文字カラムを全自動で数値IDに変換", value=False)
                 le_columns = [] if le_auto_all else st.multiselect("ID化する列", safe_df_cols)
-                le_drop = st.checkbox("元の文字カラムを自動で削除", value=True)
+                le_drop = st.checkbox("元の文字カラムを自動で削除", value=True, key="le_drop")
+
+                st.divider()
+                # ★ NEW: 欠損率や出現率で自動選別する一括ダミー化メニュー
+                st.markdown("##### 🔄 条件付き一括ダミー化 (One-Hot Encoding)")
+                st.info("💡 ユニーク値ごとに「0」か「1」のフラグ列を作成します。欠損が多すぎる列や、レアすぎるカテゴリは自動で除外してカラム爆発を防ぎます。")
+                dummy_auto_all = st.checkbox("🪄 条件に合う文字カラムを全自動でダミー化する", value=False)
                 
+                c_dum1, c_dum2 = st.columns(2)
+                with c_dum1:
+                    dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50, help="欠損が多い列を対象外にします")
+                with c_dum2:
+                    dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1, help="1%未満のレアなフラグ列をノイズとして削除します")
+
                 st.divider()
                 c1_2, c2_2 = st.columns([6, 4])
-                with c1_2: ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + safe_df_cols, key="ml_col")
+                with c1_2: ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ (複数キーワード)", ["(なし)"] + safe_df_cols, key="ml_col")
                 with c2_2: ml_delim = st.text_input("区切り文字", value="／")
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
-                
-                st.divider()
-                onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を選択", safe_df_cols)
 
         with st.expander("🛠 STEP2: 基本処理"):
             missing_action = st.radio("欠損値", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
@@ -305,9 +312,23 @@ with col_ctrl:
                     df = pd.concat([df, dum], axis=1)
                     if ml_drop_original: df = df.drop(columns=[ml_column])
 
-                if onehot_columns: df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
+                # ★ NEW: 条件付き一括ダミー化 (欠損率と出現率でフィルター)
+                if dummy_auto_all:
+                    dummy_cands = [c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]
+                    valid_dummies = [c for c in dummy_cands if (df[c].isna().mean() * 100) <= dummy_max_missing]
+                    
+                    if valid_dummies:
+                        df = pd.get_dummies(df, columns=valid_dummies, dummy_na=False, dtype=int)
+                        drop_dums = []
+                        # 作成されたダミー列のうち、出現率が低すぎるものを削除
+                        for c in df.columns:
+                            if any(orig + "_" in str(c) for orig in valid_dummies):
+                                if (df[c].mean() * 100) < dummy_min_freq:
+                                    drop_dums.append(c)
+                        if drop_dums:
+                            df = df.drop(columns=drop_dums)
+                        log.append(f"🔄 条件付き一括ダミー化: {len(valid_dummies)}列を変換 (マイナーフラグ {len(drop_dums)}列を削除)")
 
-                # ★ NEW: 一括 category 変換ロジック
                 cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
                 for c in cat_target_cols:
                     if c in df.columns: df[c] = df[c].astype("category")
