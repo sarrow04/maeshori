@@ -135,7 +135,6 @@ with col_ctrl:
                     st.session_state.processed_df = None; st.session_state.logs = []
                     st.rerun()
                     
-        # ★ 欠落していたZIP読み込み処理を完全復活！
         elif read_mode == "Train / Test まとめてZIP":
             uploaded_zip = st.file_uploader("ZIPファイルをアップロード (.zip)")
             if uploaded_zip:
@@ -173,7 +172,7 @@ with col_ctrl:
         continuous_num_cols = [c for c in safe_num_cols if not str(c).endswith('_ID')]
         
         with st.expander("🪄 STEP1: 複雑な文字列の処理", expanded=True):
-            tab1, tab2 = st.tabs(["✂️ 複数列に分割", "🔄 カテゴリの数値化"])
+            tab1, tab2 = st.tabs(["✂️ 複数列に分割", "🔄 カテゴリ処理 (型変換/ID化)"])
             with tab1:
                 c1, c2 = st.columns([5, 5])
                 with c1:
@@ -184,14 +183,24 @@ with col_ctrl:
                     split_delim = st.text_input("区切り文字", value="自動認識 (/, |, [], 空白, 全角半角)")
                     split_drop_step1 = st.checkbox("処理後に元の列を削除", value=True)
             with tab2:
+                # ★ NEW: 一括 category 型変換メニュー
+                st.markdown("##### 🅰️ カテゴリ型 (category) への一括変換 (LightGBM推奨)")
+                st.info("💡 文字をわざわざID化(0,1,2...)しなくても、category型にするだけでLightGBMが高精度に学習できます。（※保存形式はParquet推奨）")
+                cat_auto_all = st.checkbox("🪄 すべての文字カラムを category 型に変換", value=False)
+                cat_columns = [] if cat_auto_all else st.multiselect("category型にする列", safe_df_cols)
+                
+                st.divider()
+                st.markdown("##### 🔢 カテゴリの一括数値ID化 (Label Encoding)")
                 le_auto_all = st.checkbox("🪄 すべての文字カラムを全自動で数値IDに変換", value=False)
                 le_columns = [] if le_auto_all else st.multiselect("ID化する列", safe_df_cols)
                 le_drop = st.checkbox("元の文字カラムを自動で削除", value=True)
+                
                 st.divider()
                 c1_2, c2_2 = st.columns([6, 4])
                 with c1_2: ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ", ["(なし)"] + safe_df_cols, key="ml_col")
                 with c2_2: ml_delim = st.text_input("区切り文字", value="／")
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
+                
                 st.divider()
                 onehot_columns = st.multiselect("ダミー化（0と1に変換）する列を選択", safe_df_cols)
 
@@ -297,6 +306,12 @@ with col_ctrl:
                     if ml_drop_original: df = df.drop(columns=[ml_column])
 
                 if onehot_columns: df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
+
+                # ★ NEW: 一括 category 変換ロジック
+                cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
+                for c in cat_target_cols:
+                    if c in df.columns: df[c] = df[c].astype("category")
+                if cat_target_cols: log.append(f"🅰️ 一括型変換: {len(cat_target_cols)}列を category 型に変換")
 
                 le_target_cols = set([c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]) if le_auto_all else set(le_columns)
                 for c in le_target_cols:
@@ -470,6 +485,7 @@ with col_view:
                 st.download_button("「**ダウンロード**」", out_data, f"preprocessed_data.{ext}", mime, type="primary")
 
         with view_tabs[1]:
+            st.info("💡 「データ型」が `category` と表示されていれば変換成功です。")
             st.dataframe(profile_table(target_df), use_container_width=True)
 
         with view_tabs[2]:
