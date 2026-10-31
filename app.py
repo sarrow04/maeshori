@@ -194,16 +194,11 @@ with col_ctrl:
                 le_drop = st.checkbox("元の文字カラムを自動で削除", value=True, key="le_drop")
 
                 st.divider()
-                # ★ NEW: 欠損率や出現率で自動選別する一括ダミー化メニュー
                 st.markdown("##### 🔄 条件付き一括ダミー化 (One-Hot Encoding)")
-                st.info("💡 ユニーク値ごとに「0」か「1」のフラグ列を作成します。欠損が多すぎる列や、レアすぎるカテゴリは自動で除外してカラム爆発を防ぎます。")
                 dummy_auto_all = st.checkbox("🪄 条件に合う文字カラムを全自動でダミー化する", value=False)
-                
                 c_dum1, c_dum2 = st.columns(2)
-                with c_dum1:
-                    dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50, help="欠損が多い列を対象外にします")
-                with c_dum2:
-                    dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1, help="1%未満のレアなフラグ列をノイズとして削除します")
+                with c_dum1: dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50)
+                with c_dum2: dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1)
 
                 st.divider()
                 c1_2, c2_2 = st.columns([6, 4])
@@ -312,21 +307,16 @@ with col_ctrl:
                     df = pd.concat([df, dum], axis=1)
                     if ml_drop_original: df = df.drop(columns=[ml_column])
 
-                # ★ NEW: 条件付き一括ダミー化 (欠損率と出現率でフィルター)
                 if dummy_auto_all:
                     dummy_cands = [c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]
                     valid_dummies = [c for c in dummy_cands if (df[c].isna().mean() * 100) <= dummy_max_missing]
-                    
                     if valid_dummies:
                         df = pd.get_dummies(df, columns=valid_dummies, dummy_na=False, dtype=int)
                         drop_dums = []
-                        # 作成されたダミー列のうち、出現率が低すぎるものを削除
                         for c in df.columns:
                             if any(orig + "_" in str(c) for orig in valid_dummies):
-                                if (df[c].mean() * 100) < dummy_min_freq:
-                                    drop_dums.append(c)
-                        if drop_dums:
-                            df = df.drop(columns=drop_dums)
+                                if (df[c].mean() * 100) < dummy_min_freq: drop_dums.append(c)
+                        if drop_dums: df = df.drop(columns=drop_dums)
                         log.append(f"🔄 条件付き一括ダミー化: {len(valid_dummies)}列を変換 (マイナーフラグ {len(drop_dums)}列を削除)")
 
                 cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
@@ -471,7 +461,8 @@ with col_view:
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "🔥 相関ヒートマップ", "🌳 特徴量重要度 (AI判定)"])
+        # ★ NEW: AI分析と相関を削除し、時系列推移グラフを配置
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ"])
         
         with view_tabs[0]:
             if is_processed: st.success("✅ 前処理が完了しました！")
@@ -520,47 +511,33 @@ with col_view:
                 except Exception: pass
 
         with view_tabs[3]:
-            if len(num_cols_list) >= 2:
-                corr_cols = st.multiselect("相関を確認する列", num_cols_list, default=num_cols_list[:min(15, len(num_cols_list))])
-                if len(corr_cols) >= 2:
-                    fig, ax = plt.subplots(figsize=(10, 8))
-                    sns.heatmap(target_df[corr_cols].corr(), annot=True, fmt=".2f", cmap="coolwarm", center=0, vmin=-1, vmax=1, square=True, ax=ax, cbar_kws={"shrink": .8})
-                    st.pyplot(fig)
-
-        with view_tabs[4]:
-            if target_col == "(なし)": st.warning("👈 左側のメニューで「目的変数」を選択してください。")
-            else:
-                if st.button("🚀 AIで特徴量重要度を計算する", type="primary", use_container_width=True):
-                    with st.spinner("モデルを学習中..."):
-                        try:
-                            import lightgbm as lgb
-                            tr_df = target_df[target_df["_source_"] == "train"].copy() if "train" in target_df.get("_source_", pd.Series()).values else target_df.copy()
-                            tr_df = tr_df.dropna(subset=[target_col])
-                            y = pd.to_numeric(tr_df[target_col], errors="coerce")
-                            valid_idx = y.notna(); y = y[valid_idx]
-                            X = tr_df[valid_idx].drop(columns=[target_col, "_source_"], errors="ignore")
-                            
-                            X_features = pd.DataFrame()
-                            for c in X.columns:
-                                if pd.api.types.is_numeric_dtype(X[c]): X_features[c] = X[c]
-                                else: X_features[c] = pd.factorize(X[c])[0].astype(float); X_features[c] = X_features[c].replace(-1.0, np.nan)
-                                    
-                            if not X_features.empty:
-                                model = lgb.LGBMRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-                                model.fit(X_features, y)
-                                imp_df = pd.DataFrame({"特徴量": X_features.columns, "重要度": model.feature_importances_}).sort_values("重要度", ascending=False)
-                                
-                                c_imp1, c_imp2 = st.columns([4, 6])
-                                with c_imp1: st.dataframe(imp_df, use_container_width=True)
-                                with c_imp2:
-                                    fig_imp, ax_imp = plt.subplots(figsize=(10, max(5, len(imp_df.head(20))*0.4)))
-                                    sns.barplot(data=imp_df.head(20), x="重要度", y="特徴量", ax=ax_imp, palette="viridis")
-                                    st.pyplot(fig_imp)
-                                    
-                                st.divider()
-                                keep_n = st.slider("残す上位特徴量の数", min_value=1, max_value=len(imp_df), value=min(20, len(imp_df)))
-                                if st.button(f"🗑 上位 {keep_n} 件だけを残して削除", type="primary", use_container_width=True):
-                                    safe_keep = set(imp_df.head(keep_n)["特徴量"].tolist() + [target_col, "_source_"])
-                                    st.session_state.df = target_df.drop(columns=[c for c in target_df.columns if c not in safe_keep])
-                                    st.session_state.processed_df = None; st.rerun()
-                        except Exception as e: st.error(f"エラーが発生しました: {e}")
+            # ★ NEW: 時系列推移グラフ
+            st.markdown("### 📈 時系列推移グラフ")
+            st.info("💡 X軸に日付や時間のカラムを選び、Y軸に見たい数値を選択してください（複数選択可）。")
+            c_ts1, c_ts2 = st.columns([3, 7])
+            with c_ts1:
+                date_col_ts = st.selectbox("X軸 (日付/時間の列)", ["(なし)"] + [c for c in target_df.columns if c != "_source_"])
+            with c_ts2:
+                val_cols_ts = st.multiselect("Y軸 (数値列を複数選択)", num_cols_list)
+                
+            if date_col_ts != "(なし)" and val_cols_ts:
+                try:
+                    temp_df = target_df.copy()
+                    temp_df[date_col_ts] = pd.to_datetime(temp_df[date_col_ts], errors='coerce')
+                    temp_df = temp_df.dropna(subset=[date_col_ts]).sort_values(by=date_col_ts)
+                    
+                    if temp_df.empty:
+                        st.warning("有効な日付データが見つかりませんでした。")
+                    else:
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        for c in val_cols_ts:
+                            ax.plot(temp_df[date_col_ts], pd.to_numeric(temp_df[c], errors='coerce'), label=c, marker='o', markersize=3, alpha=0.8)
+                        ax.set_xlabel(date_col_ts)
+                        ax.set_ylabel("値")
+                        ax.legend()
+                        ax.grid(True, alpha=0.3)
+                        fig.autofmt_xdate()
+                        fig.tight_layout()
+                        st.pyplot(fig)
+                except Exception as e:
+                    st.error(f"グラフの描画に失敗しました: {e}")
