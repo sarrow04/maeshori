@@ -207,7 +207,8 @@ with col_ctrl:
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
 
         with st.expander("🛠 STEP2: 基本処理"):
-            missing_action = st.radio("欠損値", ["変更しない", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
+            # ★ NEW: 「数値列を0で補完」を追加
+            missing_action = st.radio("欠損値", ["変更しない", "数値列を0で補完", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
             outlier_action = st.radio("異常値", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
             clean_text = st.checkbox("文字列の不要な空白・改行を整理", value=True)
             duplicate = st.checkbox("完全一致の重複行を削除", value=False)
@@ -330,12 +331,18 @@ with col_ctrl:
                         df[f"{c}_ID"] = np.where(pd.isna(df[c]), np.nan, pd.factorize(df[c])[0])
                         if le_drop: df = df.drop(columns=[c])
 
-                if missing_action == "数値列を中央値で補完":
+                # ★ NEW: 0埋め補完の実行ロジックを追加
+                if missing_action == "数値列を0で補完":
+                    for col in get_numeric_columns(df):
+                        if col != target and df[col].isna().any():
+                            df[col] = df[col].fillna(0)
+                elif missing_action == "数値列を中央値で補完":
                     for col in get_numeric_columns(df):
                         if col != target and df[col].isna().any():
                             df[col] = df[col].fillna(df[df["_source_"] == "train"][col].median() if "train" in df["_source_"].values else df[col].median())
                 elif missing_action == "欠損行を削除":
                     df = df.dropna(subset=[target]) if target else df.dropna(how='all')
+                    
                 if duplicate: df = df.drop_duplicates()
                 if outlier_action == "IQRで異常値行を削除":
                     for col in get_numeric_columns(df):
@@ -461,7 +468,6 @@ with col_view:
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         num_cols_list = get_numeric_columns(target_df)
         
-        # ★ NEW: AI分析と相関を削除し、時系列推移グラフを配置
         view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ"])
         
         with view_tabs[0]:
@@ -511,7 +517,6 @@ with col_view:
                 except Exception: pass
 
         with view_tabs[3]:
-            # ★ NEW: 時系列推移グラフ
             st.markdown("### 📈 時系列推移グラフ")
             st.info("💡 X軸に日付や時間のカラムを選び、Y軸に見たい数値を選択してください（複数選択可）。")
             c_ts1, c_ts2 = st.columns([3, 7])
