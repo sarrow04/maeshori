@@ -207,7 +207,6 @@ with col_ctrl:
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
 
         with st.expander("🛠 STEP2: 基本処理 (欠損値・型変換など)"):
-            # ★ NEW: データ型の強制変換
             st.markdown("##### 🔄 データ型の強制変換")
             c_type1, c_type2 = st.columns(2)
             with c_type1:
@@ -246,7 +245,8 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出",
                     "【テキスト】文字数カウント",
-                    "【フラグ】キーワード有無フラグ"
+                    "【フラグ】キーワード有無フラグ",
+                    "【フラグ】複数キーワードから専用フラグを一括生成" # ★ 汎用化メニューに変更
                 ])
             
             with c1:
@@ -259,7 +259,7 @@ with col_ctrl:
             c3, c4 = st.columns([4, 6])
             with c3: fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)")
             with c4:
-                date_format = None; fe_keyword = ""; fe_col2 = None; fe_op = "+"; fe_custom_bins = ""
+                date_format = None; fe_keyword = ""; fe_col2 = None; fe_op = "+"; fe_custom_bins = ""; fe_dict_text = ""
                 fe_num_col = None; fe_aggs = ["mean"]; fe_group_width = 10; fe_group_suffix = "代"
                 fe_lag_n = 1; fe_lag_group = "(なし)"; fe_auto_cols = []
 
@@ -275,8 +275,12 @@ with col_ctrl:
                     with col4_1: fe_group_width = st.number_input("区切り幅", min_value=1, value=10)
                     with col4_2: fe_group_suffix = st.text_input("後ろにつける文字", value="代")
                 elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
-                    fe_custom_bins = st.text_input("境界値を入力 (カンマ区切り)", value="200, 300, 400, 500", help="例: 200, 300, 400, 500 と入力すると、200未満、200〜300...500以上 のように分割されます")
+                    fe_custom_bins = st.text_input("境界値を入力 (カンマ区切り)", value="200, 300, 400, 500")
                 elif fe_method == "【フラグ】キーワード有無フラグ": fe_keyword = st.text_input("キーワード (カンマ区切り)")
+                elif fe_method == "【フラグ】複数キーワードから専用フラグを一括生成":
+                    st.info("💡 「カラム名: キーワード1, キーワード2...」の形式で入力してください。複数ヒットしてもフラグは `1` になります。")
+                    default_dict = "curry: カレー\nfish: 魚, 鮭, 鯖, さば, サバ, ぶり, 鰆, さわら, イカ, 海老, エビ, えび, カキ, あじ, アジ, タラ, 鯛\nfry: フライ, カツ, 唐揚, から揚, 天ぷら\nmeat: 肉, 豚, 鶏, チキン, 牛, ハンバーグ, ロース"
+                    fe_dict_text = st.text_area("生成ルール (複数行入力可)", value=default_dict, height=120)
                 elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
                     col4_1, col4_2 = st.columns([3, 7])
                     with col4_1: fe_op = st.radio("計算", ["+", "-", "×", "÷"], horizontal=True)
@@ -286,10 +290,24 @@ with col_ctrl:
                     with col4_1: fe_num_col = st.selectbox("数値列", ["(なし)"] + continuous_num_cols)
                     with col4_2: fe_aggs = st.multiselect("方法", ["mean", "median", "sum", "std", "max", "min", "count"], default=["mean"])
 
-        with st.expander("🗑 STEP4: 大掃除 (いらない列の削除)"):
+        with st.expander("🗑 STEP4: 大掃除 (行・列の削除)"):
+            st.markdown("##### 🧹 カラムの削除")
             drop_by_name = st.text_input("列名にこの文字が含まれていたら削除 (カンマ区切り)")
             min_count = st.number_input("出現件数がこれ以下のダミー列を削除", min_value=0, value=0)
             drop_columns = st.multiselect("手動で選んで削除", safe_df_cols)
+            st.divider()
+            
+            st.markdown("##### 🎯 数値・日付で行の削除 (フィルタ)")
+            c_f1, c_f2 = st.columns(2)
+            with c_f1: range_column = st.selectbox("数値フィルタ列 (指定範囲外を削除)", ["(なし)"] + continuous_num_cols)
+            with c_f2: 
+                min_value = st.text_input("残す最小値")
+                max_value = st.text_input("残す最大値")
+                
+            c_d1, c_d2, c_d3 = st.columns([4, 3, 3])
+            with c_d1: date_filter_col = st.selectbox("日付フィルタ列", ["(なし)"] + df_cols)
+            with c_d2: date_min = st.text_input("開始日 (例: 2013-11-01)")
+            with c_d3: date_max = st.text_input("終了日 (例: 2014-05-31)")
 
         if st.button("🚀 前処理を実行する", type="primary", use_container_width=True):
             with st.spinner("処理中..."):
@@ -341,23 +359,17 @@ with col_ctrl:
                         df[f"{c}_ID"] = np.where(pd.isna(df[c]), np.nan, pd.factorize(df[c])[0])
                         if le_drop: df = df.drop(columns=[c])
 
-                # ★ NEW: データ型の強制変換を実行 (欠損補完などの前に処理)
                 if type_conv_cols:
                     for c in type_conv_cols:
                         if c in df.columns:
-                            if type_conv_target == "文字列 (str)":
-                                df[c] = df[c].astype(str)
-                            elif type_conv_target == "整数 (int)":
-                                df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')
-                            elif type_conv_target == "小数 (float)":
-                                df[c] = pd.to_numeric(df[c], errors='coerce')
-                            elif type_conv_target == "日付 (datetime)":
-                                df[c] = pd.to_datetime(df[c], errors='coerce')
+                            if type_conv_target == "文字列 (str)": df[c] = df[c].astype(str)
+                            elif type_conv_target == "整数 (int)": df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')
+                            elif type_conv_target == "小数 (float)": df[c] = pd.to_numeric(df[c], errors='coerce')
+                            elif type_conv_target == "日付 (datetime)": df[c] = pd.to_datetime(df[c], errors='coerce')
 
                 if missing_action == "数値列を0で補完":
                     for col in get_numeric_columns(df):
-                        if col != target and df[col].isna().any():
-                            df[col] = df[col].fillna(0)
+                        if col != target and df[col].isna().any(): df[col] = df[col].fillna(0)
                 elif missing_action == "数値列を中央値で補完":
                     for col in get_numeric_columns(df):
                         if col != target and df[col].isna().any():
@@ -397,13 +409,9 @@ with col_ctrl:
                         df[f"{prefix}_頻度"] = source.map(source.value_counts(dropna=False))
                     elif fe_method == "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)":
                         df[f"{prefix}_cat"] = source.astype("category")
-                        
                     elif fe_method == "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)":
                         num_s = pd.to_numeric(source, errors="coerce")
-                        df[f"{prefix}_{fe_group_width}区切り"] = num_s.apply(
-                            lambda val: f"{int(np.floor(val / fe_group_width) * fe_group_width)}{fe_group_suffix}" if pd.notna(val) else np.nan
-                        )
-                        
+                        df[f"{prefix}_{fe_group_width}区切り"] = num_s.apply(lambda val: f"{int(np.floor(val / fe_group_width) * fe_group_width)}{fe_group_suffix}" if pd.notna(val) else np.nan)
                     elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
                         try:
                             bins = [float(x.strip()) for x in fe_custom_bins.split(",") if x.strip()]
@@ -417,27 +425,19 @@ with col_ctrl:
                                     else: labels.append(f"{int(bins[i-1])}〜{int(bins[i])}")
                                 num_s = pd.to_numeric(source, errors="coerce")
                                 df[f"{prefix}_カテゴリ"] = pd.cut(num_s, bins=bins_with_inf, labels=labels, right=False)
-                        except Exception as e:
-                            st.error(f"境界値の分割に失敗しました: {e}")
-                            
+                        except Exception as e: st.error(f"境界値の分割に失敗しました: {e}")
                     elif fe_method == "【変換】数値のビン分割 (10分割)":
                         num_s = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_s, q=10, labels=False, duplicates='drop')
-                        
                     elif fe_method == "【時系列】日付列から年・月・日・曜日を抽出":
                         dt_s = pd.to_datetime(source, errors="coerce")
                         df[f"{prefix}_年"] = dt_s.dt.year; df[f"{prefix}_月"] = dt_s.dt.month
                         df[f"{prefix}_日"] = dt_s.dt.day; df[f"{prefix}_曜日"] = dt_s.dt.dayofweek
-                        
                     elif fe_method == "【時系列】過去の値を取得 (ラグ特徴量)":
-                        if fe_lag_group != "(なし)" and fe_lag_group in df.columns:
-                            df[f"{prefix}_{fe_lag_group}別_{fe_lag_n}ラグ"] = df.groupby(fe_lag_group)[fe_column].shift(fe_lag_n)
-                        else:
-                            df[f"{prefix}_{fe_lag_n}ラグ"] = df[fe_column].shift(fe_lag_n)
-                            
+                        if fe_lag_group != "(なし)" and fe_lag_group in df.columns: df[f"{prefix}_{fe_lag_group}別_{fe_lag_n}ラグ"] = df.groupby(fe_lag_group)[fe_column].shift(fe_lag_n)
+                        else: df[f"{prefix}_{fe_lag_n}ラグ"] = df[fe_column].shift(fe_lag_n)
                     elif fe_method == "【時系列】日付のフォーマット変換":
                         df[f"{prefix}_フォーマット済"] = pd.to_datetime(source, errors="coerce").dt.strftime("%Y-%m-%d" if "yyyy-MM" in date_format else "%Y/%m/%d")
-                        
                     elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
                         if fe_col2 and fe_col2 != "(なし)" and fe_col2 in df.columns:
                             s1 = pd.to_numeric(df[fe_column], errors="coerce"); s2 = pd.to_numeric(df[fe_col2], errors="coerce")
@@ -445,23 +445,31 @@ with col_ctrl:
                             elif fe_op == "-": df[f"{prefix}_差_{fe_col2}"] = s1 - s2
                             elif fe_op == "×": df[f"{prefix}_積_{fe_col2}"] = s1 * s2
                             elif fe_op == "÷": df[f"{prefix}_商_{fe_col2}"] = np.where(s2 == 0, np.nan, s1 / s2)
-                            
                     elif fe_method == "【集約】カテゴリごとの平均値などを算出 (複数選択可)":
                         if fe_num_col and fe_num_col != "(なし)" and fe_num_col in df.columns:
                             tmp = pd.DataFrame({"cat": df[fe_column], "num": pd.to_numeric(df[fe_num_col], errors="coerce"), "src": df.get("_source_", "single")})
-                            for agg in fe_aggs:
-                                df[f"{prefix}_{fe_num_col}_{agg}"] = df[fe_column].map(tmp[tmp["src"] == "train"].groupby("cat")["num"].agg(agg) if "train" in tmp["src"].values else tmp.groupby("cat")["num"].agg(agg))
-                                
+                            for agg in fe_aggs: df[f"{prefix}_{fe_num_col}_{agg}"] = df[fe_column].map(tmp[tmp["src"] == "train"].groupby("cat")["num"].agg(agg) if "train" in tmp["src"].values else tmp.groupby("cat")["num"].agg(agg))
                     elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
                         df[f"{prefix}_log1p"] = np.log1p(np.clip(pd.to_numeric(source, errors="coerce"), 0, None))
-                        
                     elif fe_method == "【フラグ】キーワード有無フラグ":
-                        for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]:
-                            df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
+                        for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]: df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
+                    
+                    # ★ NEW: 汎用辞書マッピングによる一括フラグ化処理
+                    elif fe_method == "【フラグ】複数キーワードから専用フラグを一括生成":
+                        s_str = source.astype(str)
+                        for line in fe_dict_text.split("\n"):
+                            if ":" in line or "：" in line:
+                                delim = ":" if ":" in line else "："
+                                flag_name, kws = line.split(delim, 1)
+                                flag_name = flag_name.strip()
+                                kw_list = [k.strip() for k in re.split(r'[,、|]', kws) if k.strip()]
+                                if flag_name and kw_list:
+                                    pattern = "|".join(map(re.escape, kw_list))
+                                    # str.contains() は、どれか1つでもヒットすればTrueになり、.astype(int)で「1」になるので、重複ヒット時も自動で1（無視）になります
+                                    df[f"{prefix}_{flag_name}"] = s_str.str.contains(pattern).astype(int)
 
                     elif fe_method == "【抽出】「徒歩〇分」から最短分数を抽出":
                         df[f"{prefix}_最短徒歩分"] = source.apply(lambda x: min(map(int, re.findall(r"徒歩\s*(\d+)\s*分?", str(x)))) if pd.notna(x) and re.findall(r"徒歩\s*(\d+)\s*分?", str(x)) else np.nan)
-
                     elif fe_method == "【抽出】「築〇年」から年数を抽出 (単一の数値に変換)":
                         def get_age(s):
                             if pd.isna(s): return np.nan
@@ -471,14 +479,11 @@ with col_ctrl:
                             if not y_m and not m_m: return np.nan
                             return (int(y_m.group(1)) if y_m else 0) + ((int(m_m.group(1)) if m_m else 0) / 12.0)
                         df[f"{prefix}_築年数"] = source.apply(get_age)
-
                     elif fe_method == "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割":
                         df[f"{prefix}_年"] = source.apply(lambda x: 0.0 if "新築" in str(x) else (float(re.search(r"(\d+)\s*年", str(x)).group(1)) if re.search(r"(\d+)\s*年", str(x)) else (0.0 if re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", str(x)) else np.nan)) if pd.notna(x) else np.nan)
                         df[f"{prefix}_ヶ月"] = source.apply(lambda x: 0.0 if "新築" in str(x) else (float(re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", str(x)).group(1)) if re.search(r"(\d+)\s*[ヶ箇カかケヵ]?月", str(x)) else (0.0 if re.search(r"(\d+)\s*年", str(x)) else np.nan)) if pd.notna(x) else np.nan)
-
                     elif fe_method == "【抽出】最初の数値を抽出":
                         df[f"{prefix}_数値"] = pd.to_numeric(source.astype(str).str.extract(r"([-+]?\d*\.?\d+)")[0], errors="coerce")
-
                     elif fe_method == "【テキスト】文字数カウント":
                         df[f"{prefix}_文字数"] = source.astype(str).str.len()
 
@@ -492,6 +497,24 @@ with col_ctrl:
                 if drop_columns:
                     to_drop = [c for c in drop_columns if c in df.columns and c not in [target, "_source_"]]
                     if to_drop: df = df.drop(columns=to_drop)
+
+                if date_filter_col != "(なし)":
+                    temp_dt = pd.to_datetime(df[date_filter_col], errors="coerce")
+                    mask = pd.Series(True, index=df.index)
+                    if date_min.strip():
+                        d_min = pd.to_datetime(date_min.strip(), errors="coerce")
+                        if pd.notna(d_min): mask &= temp_dt >= d_min
+                    if date_max.strip():
+                        d_max = pd.to_datetime(date_max.strip(), errors="coerce")
+                        if pd.notna(d_max): mask &= temp_dt <= d_max
+                    df = df[mask]
+
+                if range_column != "(なし)":
+                    numeric = pd.to_numeric(df[range_column], errors="coerce")
+                    mask = pd.Series(True, index=df.index)
+                    if min_value.strip(): mask &= numeric >= float(min_value)
+                    if max_value.strip(): mask &= numeric <= float(max_value)
+                    df = df.loc[mask]
 
                 df = fix_dataframe_for_streamlit(df)
                 st.session_state.processed_df = df
