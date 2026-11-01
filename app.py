@@ -207,7 +207,6 @@ with col_ctrl:
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
 
         with st.expander("🛠 STEP2: 基本処理"):
-            # ★ NEW: 「数値列を0で補完」を追加
             missing_action = st.radio("欠損値", ["変更しない", "数値列を0で補完", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
             outlier_action = st.radio("異常値", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
             clean_text = st.checkbox("文字列の不要な空白・改行を整理", value=True)
@@ -224,6 +223,7 @@ with col_ctrl:
                     "【変換】カテゴリを数値IDに変換 (Label Encoding - 決定木向け)",
                     "【型変換】カテゴリ型 (category) に変換 (LightGBMネイティブ用)",
                     "【変換】数値を任意の幅でグループ化 (例: 10刻みで「〇〇代」)",
+                    "【変換】カスタム境界値で数値をカテゴリ化", 
                     "【数値計算】2つの列で四則演算 (+, -, *, /)",
                     "【数値計算】対数変換 (Log1p - 歪み補正)",
                     "【変換】数値のビン分割 (10分割)",
@@ -249,7 +249,7 @@ with col_ctrl:
             c3, c4 = st.columns([4, 6])
             with c3: fe_prefix = st.text_input("追加する特徴量の接頭辞 (任意)")
             with c4:
-                date_format = None; fe_keyword = ""; fe_col2 = None; fe_op = "+"
+                date_format = None; fe_keyword = ""; fe_col2 = None; fe_op = "+"; fe_custom_bins = ""
                 fe_num_col = None; fe_aggs = ["mean"]; fe_group_width = 10; fe_group_suffix = "代"
                 fe_lag_n = 1; fe_lag_group = "(なし)"; fe_auto_cols = []
 
@@ -264,6 +264,8 @@ with col_ctrl:
                     col4_1, col4_2 = st.columns(2)
                     with col4_1: fe_group_width = st.number_input("区切り幅", min_value=1, value=10)
                     with col4_2: fe_group_suffix = st.text_input("後ろにつける文字", value="代")
+                elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
+                    fe_custom_bins = st.text_input("境界値を入力 (カンマ区切り)", value="200, 300, 400, 500", help="例: 200, 300, 400, 500 と入力すると、200未満、200〜300...500以上 のように分割されます")
                 elif fe_method == "【フラグ】キーワード有無フラグ": fe_keyword = st.text_input("キーワード (カンマ区切り)")
                 elif fe_method == "【数値計算】2つの列で四則演算 (+, -, *, /)":
                     col4_1, col4_2 = st.columns([3, 7])
@@ -318,12 +320,10 @@ with col_ctrl:
                             if any(orig + "_" in str(c) for orig in valid_dummies):
                                 if (df[c].mean() * 100) < dummy_min_freq: drop_dums.append(c)
                         if drop_dums: df = df.drop(columns=drop_dums)
-                        log.append(f"🔄 条件付き一括ダミー化: {len(valid_dummies)}列を変換 (マイナーフラグ {len(drop_dums)}列を削除)")
 
                 cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
                 for c in cat_target_cols:
                     if c in df.columns: df[c] = df[c].astype("category")
-                if cat_target_cols: log.append(f"🅰️ 一括型変換: {len(cat_target_cols)}列を category 型に変換")
 
                 le_target_cols = set([c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]) if le_auto_all else set(le_columns)
                 for c in le_target_cols:
@@ -331,7 +331,6 @@ with col_ctrl:
                         df[f"{c}_ID"] = np.where(pd.isna(df[c]), np.nan, pd.factorize(df[c])[0])
                         if le_drop: df = df.drop(columns=[c])
 
-                # ★ NEW: 0埋め補完の実行ロジックを追加
                 if missing_action == "数値列を0で補完":
                     for col in get_numeric_columns(df):
                         if col != target and df[col].isna().any():
@@ -382,6 +381,22 @@ with col_ctrl:
                             lambda val: f"{int(np.floor(val / fe_group_width) * fe_group_width)}{fe_group_suffix}" if pd.notna(val) else np.nan
                         )
                         
+                    elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
+                        try:
+                            bins = [float(x.strip()) for x in fe_custom_bins.split(",") if x.strip()]
+                            bins = sorted(list(set(bins)))
+                            if bins:
+                                bins_with_inf = [-np.inf] + bins + [np.inf]
+                                labels = []
+                                for i in range(len(bins_with_inf) - 1):
+                                    if i == 0: labels.append(f"{int(bins[0])}未満")
+                                    elif i == len(bins_with_inf) - 2: labels.append(f"{int(bins[-1])}以上")
+                                    else: labels.append(f"{int(bins[i-1])}〜{int(bins[i])}")
+                                num_s = pd.to_numeric(source, errors="coerce")
+                                df[f"{prefix}_カテゴリ"] = pd.cut(num_s, bins=bins_with_inf, labels=labels, right=False)
+                        except Exception as e:
+                            st.error(f"境界値の分割に失敗しました: {e}")
+                            
                     elif fe_method == "【変換】数値のビン分割 (10分割)":
                         num_s = pd.to_numeric(source, errors="coerce")
                         df[f"{prefix}_ビン"] = pd.qcut(num_s, q=10, labels=False, duplicates='drop')
@@ -546,3 +561,7 @@ with col_view:
                         st.pyplot(fig)
                 except Exception as e:
                     st.error(f"グラフの描画に失敗しました: {e}")
+```<FollowUp>
+<ElicitationsGroup>
+</ElicitationsGroup>
+</FollowUp>
