@@ -561,7 +561,3 @@ with col_view:
                         st.pyplot(fig)
                 except Exception as e:
                     st.error(f"グラフの描画に失敗しました: {e}")
-```<FollowUp>
-<ElicitationsGroup>
-</ElicitationsGroup>
-</FollowUp>
