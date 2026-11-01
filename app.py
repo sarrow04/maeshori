@@ -206,7 +206,17 @@ with col_ctrl:
                 with c2_2: ml_delim = st.text_input("区切り文字", value="／")
                 ml_drop_original = st.checkbox("処理後に元の列を自動で削除", value=True, key="ml_drop")
 
-        with st.expander("🛠 STEP2: 基本処理"):
+        with st.expander("🛠 STEP2: 基本処理 (欠損値・型変換など)"):
+            # ★ NEW: データ型の強制変換
+            st.markdown("##### 🔄 データ型の強制変換")
+            c_type1, c_type2 = st.columns(2)
+            with c_type1:
+                type_conv_cols = st.multiselect("型を変換する列を選択", safe_df_cols)
+            with c_type2:
+                type_conv_target = st.selectbox("変換後のデータ型", ["文字列 (str)", "整数 (int)", "小数 (float)", "日付 (datetime)"])
+            
+            st.divider()
+            st.markdown("##### 🧹 欠損値と異常値の処理")
             missing_action = st.radio("欠損値", ["変更しない", "数値列を0で補完", "数値列を中央値で補完", "欠損行を削除"], horizontal=True)
             outlier_action = st.radio("異常値", ["変更しない", "IQRで異常値行を削除"], horizontal=True)
             clean_text = st.checkbox("文字列の不要な空白・改行を整理", value=True)
@@ -330,6 +340,19 @@ with col_ctrl:
                     if c in df.columns:
                         df[f"{c}_ID"] = np.where(pd.isna(df[c]), np.nan, pd.factorize(df[c])[0])
                         if le_drop: df = df.drop(columns=[c])
+
+                # ★ NEW: データ型の強制変換を実行 (欠損補完などの前に処理)
+                if type_conv_cols:
+                    for c in type_conv_cols:
+                        if c in df.columns:
+                            if type_conv_target == "文字列 (str)":
+                                df[c] = df[c].astype(str)
+                            elif type_conv_target == "整数 (int)":
+                                df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')
+                            elif type_conv_target == "小数 (float)":
+                                df[c] = pd.to_numeric(df[c], errors='coerce')
+                            elif type_conv_target == "日付 (datetime)":
+                                df[c] = pd.to_datetime(df[c], errors='coerce')
 
                 if missing_action == "数値列を0で補完":
                     for col in get_numeric_columns(df):
