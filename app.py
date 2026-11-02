@@ -252,7 +252,7 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出",
                     "【テキスト】文字数カウント",
-                    "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)", # ★ NEW: 値の有無フラグ
+                    "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)",
                     "【フラグ】キーワードが含まれていれば1、なければ0", 
                     "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)"
                 ])
@@ -310,7 +310,7 @@ with col_ctrl:
             st.markdown("##### 🧹 カラムの削除")
             drop_by_name = st.text_input("列名にこの文字が含まれていたら削除 (カンマ区切り)")
             min_count = st.number_input("出現件数がこれ以下のダミー列を削除", min_value=0, value=0)
-            drop_columns = st.multiselect("手動で選んで削除", safe_df_cols)
+            drop_columns = st.multiselect("手手動で選んで削除", safe_df_cols)
             st.divider()
             
             st.markdown("##### 🎯 数値・日付で行の削除 (フィルタ)")
@@ -470,7 +470,6 @@ with col_ctrl:
                     elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
                         df[f"{prefix}_log1p"] = np.log1p(np.clip(pd.to_numeric(source, errors="coerce"), 0, None))
                     
-                    # ★ NEW: 何らかの文字が入力されていれば1、空欄なら0
                     elif fe_method == "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)":
                         def check_has_text(val):
                             if pd.isna(val): return 0
@@ -560,7 +559,7 @@ with col_view:
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ"])
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ", "🔥 相関関係 (強い順)"])
         
         with view_tabs[0]:
             if is_processed: st.success("✅ 前処理が完了しました！")
@@ -638,3 +637,29 @@ with col_view:
                         st.pyplot(fig)
                 except Exception as e:
                     st.error(f"グラフの描画に失敗しました: {e}")
+                    
+        # ★ NEW: 相関係数ランキング
+        with view_tabs[4]:
+            st.markdown("### 🔥 変数ペアの相関ランキング")
+            st.info("💡 選択した数値カラムの中で、相関が強い（1 または -1 に近い）順にペアを表示します。")
+            if len(num_cols_list) >= 2:
+                corr_cols = st.multiselect("相関を確認する列を選択", num_cols_list, default=num_cols_list[:min(20, len(num_cols_list))])
+                if len(corr_cols) >= 2:
+                    corr_matrix = target_df[corr_cols].corr()
+                    
+                    # 上三角行列のマスクを作成（対角成分もTrueにして自分自身を除外）
+                    mask = np.triu(np.ones(corr_matrix.shape), k=0).astype(bool)
+                    corr_matrix_lower = corr_matrix.where(~mask)
+                    
+                    # 縦持ちに変換してリスト化
+                    corr_pairs = corr_matrix_lower.stack().reset_index()
+                    corr_pairs.columns = ['変数1', '変数2', '相関係数']
+                    
+                    # 強さ（絶対値）順にソート
+                    corr_pairs['絶対値'] = corr_pairs['相関係数'].abs()
+                    corr_pairs = corr_pairs.sort_values(by='絶対値', ascending=False).drop(columns=['絶対値']).reset_index(drop=True)
+                    corr_pairs['相関係数'] = corr_pairs['相関係数'].round(3)
+                    
+                    st.dataframe(corr_pairs.style.background_gradient(cmap='coolwarm', subset=['相関係数'], vmin=-1, vmax=1), use_container_width=True)
+            else:
+                st.warning("相関を計算できる数値カラムが2つ以上ありません。")
