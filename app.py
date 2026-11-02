@@ -252,8 +252,8 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出",
                     "【テキスト】文字数カウント",
-                    "【フラグ】キーワード有無フラグ",
-                    "【フラグ】キーワードが含まれていれば1、なければ0", # ★ 変更
+                    "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)", # ★ NEW: 値の有無フラグ
+                    "【フラグ】キーワードが含まれていれば1、なければ0", 
                     "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)"
                 ])
             
@@ -285,12 +285,14 @@ with col_ctrl:
                 elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
                     fe_custom_bins = st.text_input("境界値を入力 (カンマ区切り)", value="200, 300, 400, 500")
                 
+                elif fe_method == "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)":
+                    st.info("💡 備考欄など、「何かしらの文字が入力されていれば 1、空欄（欠損）なら 0」にするフラグを作成します。")
+
                 elif fe_method == "【フラグ】キーワードが含まれていれば1、なければ0":
                     c_f1, c_f2 = st.columns([4, 6])
                     with c_f1: fe_flag_suffix = st.text_input("作成する列名(後ろにつく名前)", value="フラグ")
                     with c_f2: fe_keyword = st.text_input("キーワード (カンマ区切り)", placeholder="例: 肉, 豚, 牛")
                 
-                elif fe_method == "【フラグ】キーワード有無フラグ": fe_keyword = st.text_input("キーワード (カンマ区切り)")
                 elif fe_method == "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)":
                     st.info("💡 「カラム名: キーワード1, キーワード2...」の形式で入力してください。複数ヒットしてもフラグは `1` になります。")
                     default_dict = "curry: カレー\nfish: 魚, 鮭, 鯖, さば, サバ, ぶり, 鰆, さわら, イカ, 海老, エビ, えび, カキ, あじ, アジ, タラ, 鯛\nfry: フライ, カツ, 唐揚, から揚, 天ぷら\nmeat: 肉, 豚, 鶏, チキン, 牛, ハンバーグ, ロース"
@@ -467,10 +469,16 @@ with col_ctrl:
                             for agg in fe_aggs: df[f"{prefix}_{fe_num_col}_{agg}"] = df[fe_column].map(tmp[tmp["src"] == "train"].groupby("cat")["num"].agg(agg) if "train" in tmp["src"].values else tmp.groupby("cat")["num"].agg(agg))
                     elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
                         df[f"{prefix}_log1p"] = np.log1p(np.clip(pd.to_numeric(source, errors="coerce"), 0, None))
-                    elif fe_method == "【フラグ】キーワード有無フラグ":
-                        for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]: df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw), na=False).astype(int)
                     
-                    # ★ NEW: キーワードがあれば1、なければ0
+                    # ★ NEW: 何らかの文字が入力されていれば1、空欄なら0
+                    elif fe_method == "【フラグ】文字が入力されていれば1、空欄なら0 (有無フラグ)":
+                        def check_has_text(val):
+                            if pd.isna(val): return 0
+                            s_val = str(val).strip()
+                            if s_val == "" or s_val.lower() == "nan": return 0
+                            return 1
+                        df[f"{prefix}_あり"] = source.apply(check_has_text)
+                    
                     elif fe_method == "【フラグ】キーワードが含まれていれば1、なければ0":
                         kw_list = [k.strip() for k in fe_keyword.split(",") if k.strip()]
                         if kw_list:
