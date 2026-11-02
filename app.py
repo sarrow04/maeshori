@@ -194,13 +194,21 @@ with col_ctrl:
                 le_drop = st.checkbox("元の文字カラムを自動で削除", value=True, key="le_drop")
 
                 st.divider()
-                st.markdown("##### 🔄 条件付き一括ダミー化 (One-Hot Encoding)")
-                dummy_auto_all = st.checkbox("🪄 条件に合う文字カラムを全自動でダミー化する", value=False)
-                c_dum1, c_dum2 = st.columns(2)
-                with c_dum1: dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50)
-                with c_dum2: dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1)
+                st.markdown("##### 🔄 ダミー化 (One-Hot Encoding)")
+                st.info("💡 曜日などのカテゴリを「0」と「1」のフラグ列に変換します。")
+                dummy_auto_all = st.checkbox("🪄 条件に合う文字カラムを全自動で一括ダミー化する", value=False)
+                
+                if dummy_auto_all:
+                    c_dum1, c_dum2 = st.columns(2)
+                    with c_dum1: dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50)
+                    with c_dum2: dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1)
+                
+                # ★ NEW: 手動でのダミー化列選択メニューを復活！
+                st.markdown("👇 **特定の列だけを手動でダミー化したい場合はこちら**")
+                onehot_columns = [] if dummy_auto_all else st.multiselect("ダミー化する列を手動で選択", safe_df_cols)
 
                 st.divider()
+                st.markdown("##### 🔄 複数キーワードの一括フラグ化")
                 c1_2, c2_2 = st.columns([6, 4])
                 with c1_2: ml_column = st.selectbox("複雑な文字列が含まれる列を選ぶ (複数キーワード)", ["(なし)"] + safe_df_cols, key="ml_col")
                 with c2_2: ml_delim = st.text_input("区切り文字", value="／")
@@ -246,7 +254,7 @@ with col_ctrl:
                     "【抽出】最初の数値を抽出",
                     "【テキスト】文字数カウント",
                     "【フラグ】キーワード有無フラグ",
-                    "【フラグ】複数キーワードから専用フラグを一括生成" # ★ 汎用化メニューに変更
+                    "【フラグ】複数キーワードから専用フラグを一括生成"
                 ])
             
             with c1:
@@ -338,6 +346,7 @@ with col_ctrl:
                     df = pd.concat([df, dum], axis=1)
                     if ml_drop_original: df = df.drop(columns=[ml_column])
 
+                # ★ NEW: 条件一括ダミー化 または 手動ダミー化 の実行ロジック
                 if dummy_auto_all:
                     dummy_cands = [c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]
                     valid_dummies = [c for c in dummy_cands if (df[c].isna().mean() * 100) <= dummy_max_missing]
@@ -348,6 +357,9 @@ with col_ctrl:
                             if any(orig + "_" in str(c) for orig in valid_dummies):
                                 if (df[c].mean() * 100) < dummy_min_freq: drop_dums.append(c)
                         if drop_dums: df = df.drop(columns=drop_dums)
+                elif 'onehot_columns' in locals() and onehot_columns:
+                    # 個別ダミー化
+                    df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
 
                 cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
                 for c in cat_target_cols:
@@ -454,7 +466,6 @@ with col_ctrl:
                     elif fe_method == "【フラグ】キーワード有無フラグ":
                         for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]: df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
                     
-                    # ★ NEW: 汎用辞書マッピングによる一括フラグ化処理
                     elif fe_method == "【フラグ】複数キーワードから専用フラグを一括生成":
                         s_str = source.astype(str)
                         for line in fe_dict_text.split("\n"):
@@ -465,7 +476,6 @@ with col_ctrl:
                                 kw_list = [k.strip() for k in re.split(r'[,、|]', kws) if k.strip()]
                                 if flag_name and kw_list:
                                     pattern = "|".join(map(re.escape, kw_list))
-                                    # str.contains() は、どれか1つでもヒットすればTrueになり、.astype(int)で「1」になるので、重複ヒット時も自動で1（無視）になります
                                     df[f"{prefix}_{flag_name}"] = s_str.str.contains(pattern).astype(int)
 
                     elif fe_method == "【抽出】「徒歩〇分」から最短分数を抽出":
