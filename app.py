@@ -310,7 +310,7 @@ with col_ctrl:
             st.markdown("##### 🧹 カラムの削除")
             drop_by_name = st.text_input("列名にこの文字が含まれていたら削除 (カンマ区切り)")
             min_count = st.number_input("出現件数がこれ以下のダミー列を削除", min_value=0, value=0)
-            drop_columns = st.multiselect("手手動で選んで削除", safe_df_cols)
+            drop_columns = st.multiselect("手動で選んで削除", safe_df_cols)
             st.divider()
             
             st.markdown("##### 🎯 数値・日付で行の削除 (フィルタ)")
@@ -559,7 +559,7 @@ with col_view:
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         num_cols_list = get_numeric_columns(target_df)
         
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ", "🔥 相関関係 (強い順)"])
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル・分布", "📊 グループ集計 (EDA)", "📈 時系列推移グラフ", "🔥 Yとの相関ランキング"])
         
         with view_tabs[0]:
             if is_processed: st.success("✅ 前処理が完了しました！")
@@ -638,28 +638,35 @@ with col_view:
                 except Exception as e:
                     st.error(f"グラフの描画に失敗しました: {e}")
                     
-        # ★ NEW: 相関係数ランキング
+        # ★ NEW: Y（目的変数）との相関ランキング
         with view_tabs[4]:
-            st.markdown("### 🔥 変数ペアの相関ランキング")
-            st.info("💡 選択した数値カラムの中で、相関が強い（1 または -1 に近い）順にペアを表示します。")
-            if len(num_cols_list) >= 2:
-                corr_cols = st.multiselect("相関を確認する列を選択", num_cols_list, default=num_cols_list[:min(20, len(num_cols_list))])
-                if len(corr_cols) >= 2:
-                    corr_matrix = target_df[corr_cols].corr()
-                    
-                    # 上三角行列のマスクを作成（対角成分もTrueにして自分自身を除外）
-                    mask = np.triu(np.ones(corr_matrix.shape), k=0).astype(bool)
-                    corr_matrix_lower = corr_matrix.where(~mask)
-                    
-                    # 縦持ちに変換してリスト化
-                    corr_pairs = corr_matrix_lower.stack().reset_index()
-                    corr_pairs.columns = ['変数1', '変数2', '相関係数']
-                    
-                    # 強さ（絶対値）順にソート
-                    corr_pairs['絶対値'] = corr_pairs['相関係数'].abs()
-                    corr_pairs = corr_pairs.sort_values(by='絶対値', ascending=False).drop(columns=['絶対値']).reset_index(drop=True)
-                    corr_pairs['相関係数'] = corr_pairs['相関係数'].round(3)
-                    
-                    st.dataframe(corr_pairs.style.background_gradient(cmap='coolwarm', subset=['相関係数'], vmin=-1, vmax=1), use_container_width=True)
+            st.markdown("### 🔥 目的変数(Y)との相関ランキング")
+            st.info("💡 目的変数と相関が強い（1 または -1 に近い）順に特徴量を表示します。")
+            
+            if target_col == "(なし)":
+                st.warning("👈 左側のメニューで「目的変数」を選択してください。")
             else:
-                st.warning("相関を計算できる数値カラムが2つ以上ありません。")
+                y_series = pd.to_numeric(target_df[target_col], errors='coerce')
+                
+                feat_cols = [c for c in num_cols_list if c != target_col]
+                
+                if len(feat_cols) > 0:
+                    corr_cols = st.multiselect("相関を確認する特徴量を選択", feat_cols, default=feat_cols[:min(30, len(feat_cols))])
+                    
+                    if corr_cols:
+                        X_df = target_df[corr_cols].apply(pd.to_numeric, errors='coerce')
+                        corrs = X_df.corrwith(y_series)
+                        
+                        corr_df = pd.DataFrame({
+                            "特徴量": corrs.index,
+                            "相関係数": corrs.values
+                        }).dropna()
+                        
+                        if not corr_df.empty:
+                            corr_df['絶対値'] = corr_df['相関係数'].abs()
+                            corr_df = corr_df.sort_values(by='絶対値', ascending=False).drop(columns=['絶対値']).reset_index(drop=True)
+                            corr_df['相関係数'] = corr_df['相関係数'].round(3)
+                            
+                            st.dataframe(corr_df.style.background_gradient(cmap='coolwarm', subset=['相関係数'], vmin=-1, vmax=1), use_container_width=True)
+                        else:
+                            st.warning("有効な相関が計算できませんでした。")
