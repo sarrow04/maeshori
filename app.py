@@ -203,7 +203,6 @@ with col_ctrl:
                     with c_dum1: dummy_max_missing = st.number_input("元の列の欠損率がこれ以上ならダミー化しない (%)", min_value=0, max_value=100, value=50)
                     with c_dum2: dummy_min_freq = st.number_input("作成後、出現率がこれ未満のフラグを削除 (%)", min_value=0.0, max_value=100.0, value=1.0, step=0.1)
                 
-                # ★ NEW: 手動でのダミー化列選択メニューを復活！
                 st.markdown("👇 **特定の列だけを手動でダミー化したい場合はこちら**")
                 onehot_columns = [] if dummy_auto_all else st.multiselect("ダミー化する列を手動で選択", safe_df_cols)
 
@@ -253,8 +252,8 @@ with col_ctrl:
                     "【抽出】「〇年〇ヶ月」を年と月に別々の列に分割",
                     "【抽出】最初の数値を抽出",
                     "【テキスト】文字数カウント",
-                    "【フラグ】キーワード有無フラグ",
-                    "【フラグ】複数キーワードから専用フラグを一括生成"
+                    "【フラグ】複数のキーワードを1つのフラグ列(1 or 0)にまとめる", # ★ NEW: 1列まとめ
+                    "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)"
                 ])
             
             with c1:
@@ -269,7 +268,7 @@ with col_ctrl:
             with c4:
                 date_format = None; fe_keyword = ""; fe_col2 = None; fe_op = "+"; fe_custom_bins = ""; fe_dict_text = ""
                 fe_num_col = None; fe_aggs = ["mean"]; fe_group_width = 10; fe_group_suffix = "代"
-                fe_lag_n = 1; fe_lag_group = "(なし)"; fe_auto_cols = []
+                fe_lag_n = 1; fe_lag_group = "(なし)"; fe_auto_cols = []; fe_flag_suffix = ""
 
                 if fe_method == "【時系列】日付のフォーマット変換": date_format = st.selectbox("フォーマット", ["yyyy-m-d", "yyyy-MM-dd", "yyyy/m/d", "yyyy/MM/dd", "yyyyMMdd"])
                 elif fe_method == "【自動生成】数値カラム同士の総当たり割り算 (A ÷ B)": fe_auto_cols = st.multiselect("対象", continuous_num_cols, default=continuous_num_cols[:min(5, len(continuous_num_cols))])
@@ -284,8 +283,14 @@ with col_ctrl:
                     with col4_2: fe_group_suffix = st.text_input("後ろにつける文字", value="代")
                 elif fe_method == "【変換】カスタム境界値で数値をカテゴリ化":
                     fe_custom_bins = st.text_input("境界値を入力 (カンマ区切り)", value="200, 300, 400, 500")
-                elif fe_method == "【フラグ】キーワード有無フラグ": fe_keyword = st.text_input("キーワード (カンマ区切り)")
-                elif fe_method == "【フラグ】複数キーワードから専用フラグを一括生成":
+                
+                # ★ NEW: 複数のキーワードを1列のフラグにまとめるメニューのUI
+                elif fe_method == "【フラグ】複数のキーワードを1つのフラグ列(1 or 0)にまとめる":
+                    c_f1, c_f2 = st.columns([4, 6])
+                    with c_f1: fe_flag_suffix = st.text_input("作成する列名(後ろにつく名前)", value="対象フラグ")
+                    with c_f2: fe_keyword = st.text_input("キーワード (カンマ区切り)", placeholder="例: 肉, 豚, 牛")
+                
+                elif fe_method == "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)":
                     st.info("💡 「カラム名: キーワード1, キーワード2...」の形式で入力してください。複数ヒットしてもフラグは `1` になります。")
                     default_dict = "curry: カレー\nfish: 魚, 鮭, 鯖, さば, サバ, ぶり, 鰆, さわら, イカ, 海老, エビ, えび, カキ, あじ, アジ, タラ, 鯛\nfry: フライ, カツ, 唐揚, から揚, 天ぷら\nmeat: 肉, 豚, 鶏, チキン, 牛, ハンバーグ, ロース"
                     fe_dict_text = st.text_area("生成ルール (複数行入力可)", value=default_dict, height=120)
@@ -346,7 +351,6 @@ with col_ctrl:
                     df = pd.concat([df, dum], axis=1)
                     if ml_drop_original: df = df.drop(columns=[ml_column])
 
-                # ★ NEW: 条件一括ダミー化 または 手動ダミー化 の実行ロジック
                 if dummy_auto_all:
                     dummy_cands = [c for c in df.select_dtypes(include=["object", "string", "category"]).columns.tolist() if c not in [target, "_source_"]]
                     valid_dummies = [c for c in dummy_cands if (df[c].isna().mean() * 100) <= dummy_max_missing]
@@ -358,7 +362,6 @@ with col_ctrl:
                                 if (df[c].mean() * 100) < dummy_min_freq: drop_dums.append(c)
                         if drop_dums: df = df.drop(columns=drop_dums)
                 elif 'onehot_columns' in locals() and onehot_columns:
-                    # 個別ダミー化
                     df = pd.get_dummies(df, columns=onehot_columns, dummy_na=False, dtype=int)
 
                 cat_target_cols = set([c for c in df.select_dtypes(include=["object", "string"]).columns.tolist() if c not in [target, "_source_"]]) if cat_auto_all else set(cat_columns)
@@ -463,10 +466,17 @@ with col_ctrl:
                             for agg in fe_aggs: df[f"{prefix}_{fe_num_col}_{agg}"] = df[fe_column].map(tmp[tmp["src"] == "train"].groupby("cat")["num"].agg(agg) if "train" in tmp["src"].values else tmp.groupby("cat")["num"].agg(agg))
                     elif fe_method == "【数値計算】対数変換 (Log1p - 歪み補正)":
                         df[f"{prefix}_log1p"] = np.log1p(np.clip(pd.to_numeric(source, errors="coerce"), 0, None))
-                    elif fe_method == "【フラグ】キーワード有無フラグ":
-                        for kw in [k.strip() for k in fe_keyword.split(",") if k.strip()]: df[f"{prefix}_{kw}_有無"] = source.astype(str).str.contains(re.escape(kw)).astype(int)
                     
-                    elif fe_method == "【フラグ】複数キーワードから専用フラグを一括生成":
+                    # ★ NEW: 単一カラム生成ロジック
+                    elif fe_method == "【フラグ】複数のキーワードを1つのフラグ列(1 or 0)にまとめる":
+                        kw_list = [k.strip() for k in fe_keyword.split(",") if k.strip()]
+                        if kw_list:
+                            pattern = "|".join(map(re.escape, kw_list))
+                            suffix = fe_flag_suffix.strip() if fe_flag_suffix.strip() else "対象フラグ"
+                            pfx_str = f"{prefix}_" if prefix else ""
+                            df[f"{pfx_str}{suffix}"] = source.astype(str).str.contains(pattern).astype(int)
+
+                    elif fe_method == "【フラグ】複数ルールの専用フラグを一括生成 (テキスト入力)":
                         s_str = source.astype(str)
                         for line in fe_dict_text.split("\n"):
                             if ":" in line or "：" in line:
