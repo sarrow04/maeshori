@@ -313,7 +313,7 @@ with col_ctrl:
             drop_columns = st.multiselect("手動で選んで削除", safe_df_cols)
             st.divider()
             
-            st.markdown("##### 🎯 数値・日付で行の削除 (フィルタ)")
+            st.markdown("##### 🎯 行の削除 (フィルタリング)")
             c_f1, c_f2 = st.columns(2)
             with c_f1: range_column = st.selectbox("数値フィルタ列 (指定範囲外を削除)", ["(なし)"] + continuous_num_cols)
             with c_f2: 
@@ -324,6 +324,19 @@ with col_ctrl:
             with c_d1: date_filter_col = st.selectbox("日付フィルタ列", ["(なし)"] + df_cols)
             with c_d2: date_min = st.text_input("開始日 (例: 2013-11-01)")
             with c_d3: date_max = st.text_input("終了日 (例: 2014-05-31)")
+            
+            # ★ NEW: 特定のユニーク値を持つ行を削除
+            st.divider()
+            c_c1, c_c2 = st.columns([4, 6])
+            with c_c1:
+                cat_filter_col = st.selectbox("カテゴリ・文字フィルタ列", ["(なし)"] + safe_df_cols)
+            with c_c2:
+                cat_filter_vals = []
+                if cat_filter_col != "(なし)":
+                    val_counts = st.session_state.df[cat_filter_col].value_counts(dropna=False)
+                    val_map = {f"{val} ({count}件)": val for val, count in val_counts.items()}
+                    selected_opts = st.multiselect("削除したい値を選択", list(val_map.keys()))
+                    cat_filter_vals = [val_map[opt] for opt in selected_opts]
 
         if st.button("🚀 前処理を実行する", type="primary", use_container_width=True):
             with st.spinner("処理中..."):
@@ -546,6 +559,16 @@ with col_ctrl:
                     if max_value.strip(): mask &= numeric <= float(max_value)
                     df = df.loc[mask]
 
+                # ★ NEW: 特定のユニーク値を持つ行の削除ロジック
+                if 'cat_filter_col' in locals() and cat_filter_col != "(なし)" and cat_filter_vals:
+                    mask = pd.Series(False, index=df.index)
+                    for val in cat_filter_vals:
+                        if pd.isna(val):
+                            mask |= df[cat_filter_col].isna()
+                        else:
+                            mask |= (df[cat_filter_col] == val)
+                    df = df[~mask]
+
                 df = fix_dataframe_for_streamlit(df)
                 st.session_state.processed_df = df
                 st.session_state.logs = log
@@ -638,7 +661,6 @@ with col_view:
                 except Exception as e:
                     st.error(f"グラフの描画に失敗しました: {e}")
                     
-        # ★ NEW: Y（目的変数）との相関ランキング
         with view_tabs[4]:
             st.markdown("### 🔥 目的変数(Y)との相関ランキング")
             st.info("💡 目的変数と相関が強い（1 または -1 に近い）順に特徴量を表示します。")
