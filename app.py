@@ -1,5 +1,10 @@
 # =====================================================================
-# 拡張版 CSV前処理アプリ v4（Streamlit）
+# 拡張版 CSV前処理アプリ v5（Streamlit）
+# ---------------------------------------------------------------------
+# v5 の変更点（v4からの差分）
+#  1. 日本語フォントの準備を強化。Streamlit Cloud（Python 3.12以降）では japanize_matplotlib が
+#     動かず、グラフやA4サマリーPDFの日本語が「□」になるため、packages.txt で入れた Noto CJK を直接登録する
+#  2. 「📄 A4サマリー」タブを追加：PDFを作らずに、④目的変数×時系列などの図をその場で画面に表示（スマホ向け）
 # ---------------------------------------------------------------------
 # v4 の変更点（v3からの差分）
 #  1. 🤖機械学習タブの結果を「実験記録（1行のJSON）」で出力。CV・モデル・使ったカラム名・除外列・
@@ -70,10 +75,25 @@ try:
 except ImportError:
     HAS_LGBM = False
 
-try:
-    import japanize_matplotlib  # noqa: F401
-except ImportError:
-    pass
+# ---- 日本語フォント（グラフ・PDFの文字化け対策） ----
+# packages.txt に fonts-noto-cjk を書くと Streamlit Cloud に Noto CJK が入るので、それを直接登録する。
+# 見つからないときだけ japanize_matplotlib を試す（Python 3.12以降では動かないことがある）。
+from matplotlib import font_manager as _fm
+_jp_font = None
+for _p in _fm.findSystemFonts():
+    if "NotoSansCJK" in _p or "NotoSerifCJK" in _p or "ipaexg" in _p.lower():
+        try: _fm.fontManager.addfont(_p)
+        except Exception: pass
+for _n in ["Noto Sans CJK JP", "IPAexGothic", "Noto Sans CJK SC"]:
+    if any(f.name == _n for f in _fm.fontManager.ttflist):
+        plt.rcParams["font.family"] = _n; _jp_font = _n; break
+if _jp_font is None:
+    try:
+        import japanize_matplotlib  # noqa: F401
+        _jp_font = "IPAexGothic"
+    except Exception:
+        pass
+plt.rcParams["axes.unicode_minus"] = False
 
 # =====================================================================
 # 設定（アプリ全体の既定値。画面で変えられないものだけここに置いています）
@@ -112,7 +132,7 @@ ML_MAX_TRAIN_ROWS = 50000
 # 入れ方：整数。 例 42（v38ノートと同じ）。
 RANDOM_STATE = 42
 
-st.set_page_config(page_title="拡張版 CSV前処理アプリ v4", layout="wide")
+st.set_page_config(page_title="拡張版 CSV前処理アプリ v5", layout="wide")
 
 # =====================================================================
 # 共通処理
@@ -1307,7 +1327,7 @@ def make_a4_pdf(frames, target_name, time_name, include_combined=False):
 # =====================================================================
 # メインUI
 # =====================================================================
-st.title("🚀 直感型 データ前処理・特徴量生成アプリ v4")
+st.title("🚀 直感型 データ前処理・特徴量生成アプリ v5")
 
 defaults = {"df": None, "processed_df": None, "logs": [], "original_size": None, "current_file_id": None,
             "sample_raw": None, "sample_name": None, "orig_test_rows": 0, "ml_result": None, "ml_history": [], "a4_pdfs": None, "data_name": "未分類", "ml_records": []}
@@ -1598,7 +1618,7 @@ with col_view:
         is_processed = st.session_state.processed_df is not None
         target_df = st.session_state.processed_df if is_processed else st.session_state.df
         num_cols_list = get_numeric_columns(target_df)
-        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル", "📊 グループ集計", "📈 時系列グラフ", "🔥 Yとの相関", "🤖 機械学習"])
+        view_tabs = st.tabs(["データ確認 ＆ ダウンロード", "プロファイル", "📊 グループ集計", "📈 時系列グラフ", "🔥 Yとの相関", "🤖 機械学習", "📄 A4サマリー"])
 
         with view_tabs[0]:
             src = source_of(target_df)
@@ -1850,3 +1870,39 @@ with col_view:
                     with hc2:
                         if st.button("履歴を消す", use_container_width=True):
                             st.session_state.ml_history = []; st.session_state.ml_records = []; st.session_state.pop("hist_editor", None); st.rerun()
+
+        # ------------------------- 📄 A4サマリー（画面表示） -------------------------
+        with view_tabs[6]:
+            st.markdown("### 📄 A4サマリー（画面で見る）")
+            st.caption("A4サマリーノート v7 と同じ図を、PDFにせずここに表示します。PDFが欲しいときは「データ確認」タブの「PDFを作成」")
+            if _jp_font is None:
+                st.warning("日本語フォントが見つからないため、図の日本語が「□」になります。packages.txt（fonts-noto-cjk）を一緒に置いてください。")
+            src_now = source_of(target_df)
+            parts = [k for k in ("train", "test", "single") if (src_now == k).any()]
+            s1, s2 = st.columns(2)
+            with s1: which = st.radio("どのデータ", parts, horizontal=True, key="a4_which")
+            with s2: pages_sel = st.multiselect("表示するページ", ["④目的変数×時系列", "⑤目的変数との関係", "②グラフ一覧", "③相関"],
+                                                default=["④目的変数×時系列"], key="a4_pages")
+            if st.button("図を表示", use_container_width=True, key="a4_show"):
+                dfv = target_df[src_now == which].drop(columns=["_source_"]).reset_index(drop=True)
+                globals().update(TIME_COL=date_col or "", TARGET=target or "-")
+                tr = None
+                if which != "test" and (src_now == "test").any() and date_col:
+                    tt = pd.to_datetime(target_df.loc[src_now == "test", date_col], errors="coerce").dropna()
+                    if len(tt): tr = (tt.min(), tt.max())
+
+                class _Grab:  # PdfPages の代わりに、作った図を受け取って画面に出す
+                    def savefig(self, fig): st.pyplot(fig)
+                g = _Grab()
+                with st.spinner("作図中..."):
+                    try:
+                        if "④目的変数×時系列" in pages_sel:
+                            if not find_target(dfv): st.info("このデータには目的変数の値がありません（testは空なので④⑤は出ません）")
+                            elif draw_target_overview(dfv, which, g, None, tr): draw_target_feature_pages(dfv, which, g, None, tr)
+                            else: st.info("日付列が見つからないため④は出せません。左の「📅日付列」を選んでください")
+                        if "⑤目的変数との関係" in pages_sel and find_target(dfv): draw_target_relation_pages(dfv, which, g)
+                        if "②グラフ一覧" in pages_sel: draw_graph_pages(dfv, which, g)
+                        if "③相関" in pages_sel: draw_corr_page(dfv, which, g)
+                    except Exception as e:
+                        st.error(f"作図でエラー: {e}")
+                    plt.close("all")
