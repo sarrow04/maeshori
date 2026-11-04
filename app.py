@@ -1,5 +1,14 @@
 # =====================================================================
-# 拡張版 CSV前処理アプリ v5（Streamlit）
+# 拡張版 CSV前処理アプリ v6（Streamlit）
+# ---------------------------------------------------------------------
+# v6 の変更点（v5からの差分）
+#  1. 【止まる不具合】v5は画面を操作するたびに日本語フォント約300MB分（Noto CJK 全太さ）を読み直しており、
+#     Streamlit Cloud のメモリ上限で止まっていた → フォントは起動時に1回・1書体だけ登録
+#  2. 【文字化け】フォントを matplotlib-fontja（IPAexゴシックを同梱。Python 3.12以降でも動く）に変更。
+#     packages.txt がなくても日本語が出る。PDFも軽いフォント（TTF）で作るので速く・軽くなる
+#  3. PDFは「1データずつ」作成（train / test / 合体 を選ぶ）。メモリを節約
+#  4. エラー時は詳細（どの行で止まったか）を画面に出す
+#  5. 0/1のbool列・欠損ありの整数列（Int64）を、作図前に数値へ直す（作図エラー防止）
 # ---------------------------------------------------------------------
 # v5 の変更点（v4からの差分）
 #  1. 日本語フォントの準備を強化。Streamlit Cloud（Python 3.12以降）では japanize_matplotlib が
@@ -47,6 +56,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # 画面なしで描く（Streamlit Cloud向け）
 import matplotlib.pyplot as plt
 import re
 import io
@@ -76,23 +87,36 @@ except ImportError:
     HAS_LGBM = False
 
 # ---- 日本語フォント（グラフ・PDFの文字化け対策） ----
-# packages.txt に fonts-noto-cjk を書くと Streamlit Cloud に Noto CJK が入るので、それを直接登録する。
-# 見つからないときだけ japanize_matplotlib を試す（Python 3.12以降では動かないことがある）。
-from matplotlib import font_manager as _fm
-_jp_font = None
-for _p in _fm.findSystemFonts():
-    if "NotoSansCJK" in _p or "NotoSerifCJK" in _p or "ipaexg" in _p.lower():
-        try: _fm.fontManager.addfont(_p)
-        except Exception: pass
-for _n in ["Noto Sans CJK JP", "IPAexGothic", "Noto Sans CJK SC"]:
-    if any(f.name == _n for f in _fm.fontManager.ttflist):
-        plt.rcParams["font.family"] = _n; _jp_font = _n; break
-if _jp_font is None:
+# 1) matplotlib-fontja（requirements.txt に記載。IPAexゴシック同梱・軽い）を最優先
+# 2) なければ、サーバーにある日本語フォントを「1書体だけ」登録（v5は全太さを毎回読んで止まっていた）
+# 3) それもなければ japanize_matplotlib
+# @st.cache_resource で、アプリ起動時に1回だけ実行する
+@st.cache_resource(show_spinner=False)
+def _setup_jp_font():
     try:
-        import japanize_matplotlib  # noqa: F401
-        _jp_font = "IPAexGothic"
+        import matplotlib_fontja  # noqa: F401
+        return "IPAexGothic"
     except Exception:
         pass
+    from matplotlib import font_manager as fm
+    for path in fm.findSystemFonts():
+        low = path.lower()
+        if low.endswith(("ipaexg.ttf", "ipagp.ttf", "notosanscjk-regular.ttc", "notosanscjkjp-regular.otf")):
+            try:
+                fm.fontManager.addfont(path)
+                return fm.FontProperties(fname=path).get_name()
+            except Exception:
+                continue
+    try:
+        import japanize_matplotlib  # noqa: F401
+        return "IPAexGothic"
+    except Exception:
+        return None
+
+
+_jp_font = _setup_jp_font()
+if _jp_font:
+    plt.rcParams["font.family"] = _jp_font
 plt.rcParams["axes.unicode_minus"] = False
 
 # =====================================================================
@@ -132,7 +156,7 @@ ML_MAX_TRAIN_ROWS = 50000
 # 入れ方：整数。 例 42（v38ノートと同じ）。
 RANDOM_STATE = 42
 
-st.set_page_config(page_title="拡張版 CSV前処理アプリ v5", layout="wide")
+st.set_page_config(page_title="拡張版 CSV前処理アプリ v6", layout="wide")
 
 # =====================================================================
 # 共通処理
@@ -1294,7 +1318,19 @@ def draw_target_relation_pages(df, title, pdf, png_prefix=None):
 
 
 
-def make_a4_pdf(frames, target_name, time_name, include_combined=False):
+def _plot_ready(df):
+    """作図でエラーになりやすい型を直す：bool→0/1、Int64などの欠損あり数値→float"""
+    df = df.copy()
+    for c in df.columns:
+        s_ = df[c]
+        if pd.api.types.is_bool_dtype(s_):
+            df[c] = s_.astype(float)
+        elif pd.api.types.is_extension_array_dtype(s_) and pd.api.types.is_numeric_dtype(s_):
+            df[c] = pd.to_numeric(s_, errors="coerce").astype(float)
+    return df
+
+
+def make_a4_pdf(frames, target_name, time_name, include_combined=False, only=None):
     """frames: {"train": df, "test": df} → {ファイル名: PDFのバイト列}。ノートv7の「実行」セルと同じ流れ"""
     global TIME_COL, TARGET
     TIME_COL = time_name or ""
@@ -1305,9 +1341,12 @@ def make_a4_pdf(frames, target_name, time_name, include_combined=False):
         if tc:
             tt = pd.to_datetime(frames["test"][tc], errors="coerce").dropna()
             if len(tt): test_range = (tt.min(), tt.max())
+    frames = {k: _plot_ready(v) for k, v in frames.items()}
     jobs = [(n, d, n) for n, d in frames.items()]
     if include_combined and len(frames) == 2:
         jobs.append(("all", pd.concat([frames["train"].assign(_set="train"), frames["test"].assign(_set="test")], ignore_index=True), "train+test合体"))
+    if only:  # 指定したデータだけ作る（testの期間はtrainのグラフの色付けに使うので frames には残す）
+        jobs = [j for j in jobs if j[0] in only]
     out = {}
     for name, df, label in jobs:
         buf = io.BytesIO()
@@ -1327,7 +1366,7 @@ def make_a4_pdf(frames, target_name, time_name, include_combined=False):
 # =====================================================================
 # メインUI
 # =====================================================================
-st.title("🚀 直感型 データ前処理・特徴量生成アプリ v5")
+st.title("🚀 直感型 データ前処理・特徴量生成アプリ v6")
 
 defaults = {"df": None, "processed_df": None, "logs": [], "original_size": None, "current_file_id": None,
             "sample_raw": None, "sample_name": None, "orig_test_rows": 0, "ml_result": None, "ml_history": [], "a4_pdfs": None, "data_name": "未分類", "ml_records": []}
@@ -1661,19 +1700,26 @@ with col_view:
             st.divider()
             st.markdown("##### 📄 A4サマリーPDF（データの状況確認）")
             st.caption("①基本情報表 ②グラフ一覧 ③相関 ④目的変数×時系列 ⑤目的変数との関係。目的変数・日付列は左の設定を使います（testは目的変数が空なので①〜③のみ）")
+            src_now = source_of(target_df)
+            a4_opts = [k for k in ("train", "test", "single") if (src_now == k).any()]
+            if "train" in a4_opts and "test" in a4_opts: a4_opts.append("合体(all)")
             a4c1, a4c2 = st.columns([6, 4])
-            with a4c1: a4_all = st.checkbox("train+test合体のPDFも作る", value=False)
+            with a4c1: a4_which = st.radio("PDFにするデータ（1つずつ作ると止まりにくい）", a4_opts, horizontal=True, key="a4_pdf_which")
             with a4c2: a4_go = st.button("PDFを作成", use_container_width=True)
             if a4_go:
-                with st.spinner("PDF作成中..."):
+                with st.spinner("PDF作成中...（20〜60秒ほど）"):
                     try:
-                        src_now = source_of(target_df)
-                        fr = {k: target_df[src_now == k].drop(columns=["_source_"]).reset_index(drop=True)
-                              for k in ("train", "test", "single") if (src_now == k).any()}
-                        if "single" in fr: fr = {"data": fr["single"]}
-                        st.session_state.a4_pdfs = make_a4_pdf(fr, target, date_col, a4_all)
+                        sub = lambda k: target_df[src_now == k].drop(columns=["_source_"]).reset_index(drop=True)
+                        if a4_which == "single":
+                            pdfs = make_a4_pdf({"data": sub("single")}, target, date_col)
+                        else:
+                            fr = {k: sub(k) for k in ("train", "test") if k in a4_opts}
+                            name = "all" if a4_which == "合体(all)" else a4_which
+                            pdfs = make_a4_pdf(fr, target, date_col, include_combined=(name == "all"), only=[name])
+                        st.session_state.a4_pdfs = pdfs
                     except Exception as e:
                         st.error(f"PDF作成でエラー: {e}")
+                        st.exception(e)
             for fname, b in (st.session_state.get("a4_pdfs") or {}).items():
                 st.download_button(f"⬇ {fname}", b, fname, "application/pdf", use_container_width=True, key=f"dl_{fname}")
 
