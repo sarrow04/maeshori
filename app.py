@@ -63,17 +63,25 @@ st.sidebar.title("⚙️ アプリ設定")
 mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
 st.title(f"📊 データ分析・MLアプリ（{mode}）")
 
-if "train_df" not in st.session_state:
-    st.session_state.train_df = None
-if "test_df" not in st.session_state:
-    st.session_state.test_df = None
+# セッション状態の初期化
+for key, default_val in [
+    ("train_df", None),
+    ("test_df", None),
+    ("test_raw_df", None),
+    ("test_preds", None),
+    ("last_model_name", ""),
+    ("last_task_type", "")
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default_val
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "1. 読み込み・概要",
     "2. グラフ可視化 (EDA)",
     "3. 前処理",
     "4. 特徴量作成",
-    "5. 機械学習・評価"
+    "5. 機械学習・評価",
+    "6. 提出・データ出力 (Submit)"
 ])
 
 # ==========================================
@@ -86,17 +94,18 @@ with tab1:
         train_file = st.file_uploader("学習用 / 分析用データ (train)", type=["csv", "parquet"])
         if train_file:
             df, start_m, end_m = load_file(train_file)
-            if st.session_state.train_df is None or st.button("データを初期状態にリセット"):
+            if st.session_state.train_df is None or st.button("trainデータを初期状態にリセット"):
                 st.session_state.train_df = df.copy()
-            st.success(f"読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | メモリ: {start_m:.2f}MB → {end_m:.2f}MB")
+            st.success(f"Train完了: {df.shape[0]:,}行 × {df.shape[1]}列 | メモリ: {start_m:.2f}MB → {end_m:.2f}MB")
 
     with col2:
         if mode == "コンペ用モード":
             test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet"])
             if test_file:
                 t_df, t_start, t_end = load_file(test_file)
-                if st.session_state.test_df is None:
+                if st.session_state.test_df is None or st.button("testデータを初期状態にリセット"):
                     st.session_state.test_df = t_df.copy()
+                    st.session_state.test_raw_df = t_df.copy()
                 st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | メモリ: {t_start:.2f}MB → {t_end:.2f}MB")
 
     if st.session_state.train_df is not None:
@@ -129,9 +138,6 @@ with tab1:
 
         st.write("### データプレビュー（先頭10行）")
         st.dataframe(df_show.head(10), use_container_width=True)
-
-        parquet_bytes = df_show.to_parquet(index=False)
-        st.download_button("軽量化・加工済みデータをParquetで保存", data=parquet_bytes, file_name="train_processed.parquet")
 
 # ==========================================
 # TAB 2: グラフ可視化 (Plotly)
@@ -214,7 +220,6 @@ with tab3:
             horizontal=True
         )
 
-        # --- 1. 基本前処理 ---
         if prep_mode == "1. 列削除・欠損補完":
             st.write("### 欠損値の確認")
             null_df = pd.DataFrame({"欠損数": df.isnull().sum(), "欠損率(%)": (df.isnull().mean() * 100).round(2), "型": df.dtypes.astype(str)})
@@ -239,7 +244,6 @@ with tab3:
                             st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
                 st.success("基本前処理を適用しました！")
 
-        # --- 2. 日付・時刻の分解 ---
         elif prep_mode == "2. 日付・時刻の分解（年月・曜日など）":
             st.write("### 日付列を年・月・日・曜日などに分解")
             dt_col = st.selectbox("日付・時刻の列を選択", all_cols, key="dt_col")
@@ -279,7 +283,6 @@ with tab3:
                         st.session_state.test_df = apply_dt(st.session_state.test_df)
                     st.success(f"「{dt_col}」を分解しました！")
 
-        # --- 3. 文字列の抜き取り・加工 ---
         elif prep_mode == "3. 文字列の抜き取り・加工":
             st.write("### 特定の文字列を抜き取る・フラグ化する")
             str_col = st.selectbox("対象の列を選択", all_cols, key="str_col")
@@ -668,6 +671,12 @@ with tab5:
 
                     progress.progress((fold + 1) / len(splits))
 
+                # 予測結果をタブ6用に保存
+                if test_preds is not None:
+                    st.session_state.test_preds = test_preds
+                    st.session_state.last_model_name = model_name.split()[0]
+                    st.session_state.last_task_type = task_type
+
                 valid_mask = ~np.isnan(oof_preds)
                 y_eval = y[valid_mask]
                 p_eval = oof_preds[valid_mask]
@@ -704,12 +713,108 @@ with tab5:
                 st.plotly_chart(fig_imp, use_container_width=True)
 
                 if test_preds is not None:
-                    sub_df = pd.DataFrame({"prediction": test_preds})
-                    st.download_button(
-                        "📥 予測結果 (submission.csv) をダウンロード",
-                        data=sub_df.to_csv(index=False).encode("utf-8"),
-                        file_name=f"submission_{model_name.split()[0]}.csv",
-                        mime="text/csv"
-                    )
+                    st.info("予測結果を保存しました！「6. 提出・データ出力 (Submit)」タブから提出ファイルを整形してダウンロードできます。")
+
             except Exception as e:
                 st.error(f"学習中にエラーが発生しました: {e}")
+
+# ==========================================
+# TAB 6: 提出・データ出力 (Submit)
+# ==========================================
+with tab6:
+    st.subheader("📦 加工済みデータの出力 (Train / Test)")
+    if st.session_state.train_df is None:
+        st.info("先にタブ1でデータを読み込んでください。")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write(f"**Trainデータ**: {st.session_state.train_df.shape[0]:,}行 × {st.session_state.train_df.shape[1]}列")
+            st.download_button(
+                "📥 TrainをParquetで保存（軽量・高速）",
+                data=st.session_state.train_df.to_parquet(index=False),
+                file_name="train_processed.parquet",
+                key="dl_tr_pq"
+            )
+            st.download_button(
+                "📥 TrainをCSVで保存",
+                data=st.session_state.train_df.to_csv(index=False).encode("utf-8"),
+                file_name="train_processed.csv",
+                mime="text/csv",
+                key="dl_tr_csv"
+            )
+
+        with c2:
+            if st.session_state.test_df is not None:
+                st.write(f"**Testデータ**: {st.session_state.test_df.shape[0]:,}行 × {st.session_state.test_df.shape[1]}列")
+                st.download_button(
+                    "📥 TestをParquetで保存（軽量・高速）",
+                    data=st.session_state.test_df.to_parquet(index=False),
+                    file_name="test_processed.parquet",
+                    key="dl_te_pq"
+                )
+                st.download_button(
+                    "📥 TestをCSVで保存",
+                    data=st.session_state.test_df.to_csv(index=False).encode("utf-8"),
+                    file_name="test_processed.csv",
+                    mime="text/csv",
+                    key="dl_te_csv"
+                )
+            else:
+                st.info("コンペ用モードでTestデータを読み込むと、ここから出力できます。")
+
+    st.divider()
+    st.subheader("🏆 コンペ提出ファイル (Submit) の作成・出力")
+
+    if st.session_state.test_preds is None:
+        st.info("コンペ用モードでTestデータを読み込み、タブ5で学習を実行すると、ここで提出ファイルを作成できます。")
+    else:
+        preds = st.session_state.test_preds.copy()
+        raw_test = st.session_state.test_raw_df
+
+        c1, c2, c3 = st.columns(3)
+        id_col_options = ["なし（予測値のみ）"] + (raw_test.columns.tolist() if raw_test is not None else [])
+        id_col = c1.selectbox("ID列を選択（元Testデータから取得）", id_col_options, index=1 if len(id_col_options) > 1 else 0)
+        pred_col_name = c2.text_input("予測列の列名", value="prediction")
+        include_header = c3.checkbox("ヘッダー（列名）を出力する", value=True, help="SIGNATEなどヘッダー不要のコンペはオフにしてください")
+
+        # 予測値の後処理
+        st.write("#### 予測値の後処理（任意）")
+        p1, p2, p3 = st.columns(3)
+        clip_zero = p1.checkbox("0未満を0にクリップ", value=False)
+        round_int = p2.checkbox("四捨五入して整数化", value=False)
+        binarize = p3.checkbox("しきい値で 0/1 に変換（分類用）", value=False)
+
+        if clip_zero:
+            preds = np.clip(preds, 0, None)
+        if binarize:
+            th = st.slider("0/1 変換のしきい値", 0.0, 1.0, 0.5, 0.01)
+            preds = (preds >= th).astype(int)
+        elif round_int:
+            preds = np.rint(preds).astype(int)
+
+        # Submit用DataFrameの組み立て
+        if id_col != "なし（予測値のみ）" and raw_test is not None:
+            sub_df = pd.DataFrame({id_col: raw_test[id_col].values, pred_col_name: preds})
+        else:
+            sub_df = pd.DataFrame({pred_col_name: preds})
+
+        # 提出前チェック
+        st.write("#### 提出前チェック")
+        chk1, chk2, chk3, chk4 = st.columns(4)
+        chk1.metric("行数", f"{len(sub_df):,}")
+        chk2.metric("欠損数", f"{sub_df.isnull().sum().sum():,}")
+        chk3.metric("最小値", f"{np.nanmin(preds):.4f}")
+        chk4.metric("最大値", f"{np.nanmax(preds):.4f}")
+
+        st.dataframe(sub_df.head(5), use_container_width=True)
+
+        file_name = st.text_input("出力ファイル名", value=f"submission_{st.session_state.last_model_name}.csv")
+        csv_data = sub_df.to_csv(index=False, header=include_header).encode("utf-8")
+
+        st.download_button(
+            "🚀 Submitファイル (CSV) をダウンロード",
+            data=csv_data,
+            file_name=file_name,
+            mime="text/csv",
+            type="primary"
+        )
