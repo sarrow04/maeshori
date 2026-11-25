@@ -83,15 +83,29 @@ with tab1:
         df_show = st.session_state.train_df
 
         st.write("### カラム概要（型・欠損・ユニーク数）")
+        top_vals = []
+        for c in df_show.columns:
+            vc = df_show[c].value_counts(dropna=False).head(3)
+            top_vals.append(", ".join([f"{k}({v:,})" for k, v in vc.items()]))
+
         summary_df = pd.DataFrame({
             "型": df_show.dtypes.astype(str),
             "ユニーク数": df_show.nunique(),
             "ユニーク率(%)": (df_show.nunique() / len(df_show) * 100).round(2),
             "欠損数": df_show.isnull().sum(),
             "欠損率(%)": (df_show.isnull().mean() * 100).round(2),
-            "サンプル値（上位3件）": [", ".join(map(str, df_show[c].dropna().unique()[:3])) for c in df_show.columns]
+            "頻出トップ3（値(出現数)）": top_vals
         })
         st.dataframe(summary_df, use_container_width=True)
+
+        st.write("### カラム別の全ユニーク値・出現数")
+        selected_col = st.selectbox("詳細を見たいカラムを選択", df_show.columns.tolist())
+        if selected_col:
+            vc_df = df_show[selected_col].value_counts(dropna=False).reset_index()
+            vc_df.columns = ["値（NaN含む）", "出現数"]
+            vc_df["割合(%)"] = (vc_df["出現数"] / len(df_show) * 100).round(2)
+            st.caption(f"「{selected_col}」の全ユニーク値: {len(vc_df):,}種類（出現数が多い順）")
+            st.dataframe(vc_df, use_container_width=True)
 
         st.write("### データプレビュー（先頭10行）")
         st.dataframe(df_show.head(10), use_container_width=True)
@@ -192,22 +206,18 @@ with tab4:
 
         if st.button("🚀 LightGBMで学習・CV実行"):
             try:
-                # 目的変数が欠損している行は除外
                 work_df = df.dropna(subset=[target_col]).reset_index(drop=True)
                 X = work_df.drop(columns=[target_col]).copy()
                 y = work_df[target_col].copy()
 
-                # 二値分類の事前チェック
                 if "二値分類" in task_type:
                     n_unique = y.nunique()
                     if n_unique != 2:
                         st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {n_unique} 個です（2個である必要があります）。回帰タスクの場合は「回帰 (RMSE)」を選んでください。")
                         st.stop()
-                    # 文字列などの場合は自動で0/1にエンコード
                     if not pd.api.types.is_numeric_dtype(y):
                         y = pd.Series(pd.factorize(y)[0])
 
-                # object/string型をcategory型へ変換
                 for col in X.select_dtypes(include=["object", "string"]).columns:
                     X[col] = X[col].astype("category")
 
@@ -252,7 +262,6 @@ with tab4:
                     importances += model.feature_importances_ / n_splits
                     progress.progress((fold + 1) / n_splits)
 
-                # スコア表示
                 if "回帰" in task_type:
                     score = root_mean_squared_error(y, oof_preds)
                     st.metric("OOF RMSE（低いほど良い）", f"{score:.5f}")
@@ -260,12 +269,10 @@ with tab4:
                     score = roc_auc_score(y, oof_preds)
                     st.metric("OOF ROC-AUC（高いほど良い）", f"{score:.5f}")
 
-                # 特徴量重要度グラフ
                 imp_df = pd.DataFrame({"特徴量": X.columns, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
                 fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title="特徴量重要度 (Top 20)")
                 st.plotly_chart(fig_imp, use_container_width=True)
 
-                # コンペ用：提出ファイル出力
                 if test_preds is not None:
                     sub_df = pd.DataFrame({"prediction": test_preds})
                     st.download_button(
