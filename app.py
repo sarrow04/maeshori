@@ -3,8 +3,22 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import lightgbm as lgb
-from sklearn.model_selection import KFold, StratifiedKFold
-from sklearn.metrics import root_mean_squared_error, roc_auc_score
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.linear_model import Ridge, LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import (
+    root_mean_squared_error,
+    mean_absolute_error,
+    r2_score,
+    root_mean_squared_log_error,
+    roc_auc_score,
+    accuracy_score,
+    f1_score,
+    log_loss
+)
 
 st.set_page_config(page_title="Data Analysis & Competition App", layout="wide")
 
@@ -59,7 +73,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "2. グラフ可視化 (EDA)",
     "3. 前処理",
     "4. 特徴量作成",
-    "5. 機械学習 (LightGBM)"
+    "5. 機械学習・評価"
 ])
 
 # ==========================================
@@ -130,12 +144,30 @@ with tab2:
         num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         all_cols = df.columns.tolist()
 
-        chart_type = st.selectbox("グラフの種類", ["ヒストグラム（分布）", "箱ひげ図（外れ値確認）", "散布図（2変数の関係）", "相関ヒートマップ"])
+        chart_type = st.selectbox(
+            "グラフの種類",
+            ["ヒストグラム（分布）", "時系列折れ線グラフ", "箱ひげ図（外れ値確認）", "散布図（2変数の関係）", "相関ヒートマップ"]
+        )
 
         if chart_type == "ヒストグラム（分布）":
             col = st.selectbox("対象列", all_cols)
             fig = px.histogram(df, x=col, marginal="box", title=f"{col} の分布")
             st.plotly_chart(fig, use_container_width=True)
+
+        elif chart_type == "時系列折れ線グラフ":
+            if len(num_cols) == 0:
+                st.warning("数値列がありません。")
+            else:
+                c1, c2, c3 = st.columns(3)
+                x_col = c1.selectbox("時間軸 (X)", all_cols)
+                y_col = c2.selectbox("数値列 (Y)", num_cols)
+                color_col = c3.selectbox("グループ色分け（任意）", ["なし"] + all_cols)
+                plot_df = df.sort_values(x_col)
+                if len(plot_df) > 10000:
+                    st.caption("※描画軽量化のため先頭10,000件を表示しています")
+                    plot_df = plot_df.head(10000)
+                fig = px.line(plot_df, x=x_col, y=y_col, color=None if color_col == "なし" else color_col, title=f"{x_col} ごとの {y_col} 推移")
+                st.plotly_chart(fig, use_container_width=True)
 
         elif chart_type == "箱ひげ図（外れ値確認）":
             if len(num_cols) == 0:
@@ -214,7 +246,6 @@ with tab4:
             horizontal=True
         )
 
-        # --- 1. 四則演算 ---
         if fe_type == "1. 四則演算（比率・差分など）":
             if len(num_cols) < 2:
                 st.warning("数値列が2つ以上必要です。")
@@ -245,7 +276,6 @@ with tab4:
                         st.session_state.test_df = apply_op(st.session_state.test_df)
                     st.success(f"特徴量「{new_col_name}」を追加しました！")
 
-        # --- 2. GroupBy集約 ---
         elif fe_type == "2. GroupBy集約（カテゴリ別集計）":
             if len(num_cols) == 0:
                 st.warning("数値列がありません。")
@@ -261,8 +291,6 @@ with tab4:
                     else:
                         tr = st.session_state.train_df
                         te = st.session_state.test_df
-
-                        # trainとtestの両方に列があれば結合して一括集計
                         use_both = (te is not None) and (grp_col in te.columns) and (val_col in te.columns)
                         if use_both:
                             tr_len = len(tr)
@@ -279,10 +307,8 @@ with tab4:
                                 new_name = f"{grp_col}_{val_col}_{func}"
                                 tr[new_name] = tr.groupby(grp_col, observed=False)[val_col].transform(func).astype(np.float32)
                             st.session_state.train_df = tr
-
                         st.success(f"GroupBy特徴量（{len(agg_funcs)}列）を追加しました！")
 
-        # --- 3. 時系列（ラグ・差分・移動平均） ---
         elif fe_type == "3. 時系列（ラグ・差分・移動平均）":
             if len(num_cols) == 0:
                 st.warning("数値列がありません。")
@@ -304,7 +330,6 @@ with tab4:
                     tr = st.session_state.train_df.copy()
                     te = st.session_state.test_df.copy() if st.session_state.test_df is not None else None
 
-                    # trainとtestを結合して時系列計算するかどうか判定
                     req_cols = [ts_val_col]
                     if ts_sort_col != "並び替えない（現在の行順）":
                         req_cols.append(ts_sort_col)
@@ -323,13 +348,11 @@ with tab4:
                         tr["_orig_idx"] = np.arange(len(tr))
                         work = tr
 
-                    # ソート
                     if ts_sort_col != "並び替えない（現在の行順）":
                         sort_keys = [ts_grp_col, ts_sort_col] if ts_grp_col != "なし（全体で計算）" else [ts_sort_col]
                         work = work.sort_values(sort_keys).reset_index(drop=True)
 
                     created_cols = []
-                    # ラグ・差分
                     for lag in lags:
                         lag_col = f"{ts_val_col}_lag{lag}"
                         if ts_grp_col != "なし（全体で計算）":
@@ -343,7 +366,6 @@ with tab4:
                             work[diff_col] = (work[ts_val_col] - work[lag_col]).astype(np.float32)
                             created_cols.append(diff_col)
 
-                    # 移動平均・移動標準偏差
                     shift_n = 1 if prevent_leak else 0
                     for w in windows:
                         ma_col = f"{ts_val_col}_ma{w}"
@@ -358,11 +380,9 @@ with tab4:
                             work[std_col] = s.rolling(w, min_periods=1).std().astype(np.float32)
                         created_cols.extend([ma_col, std_col])
 
-                    # 元の行順・train/testに戻す
                     if use_both:
                         new_tr = work[work["_is_train"] == 1].sort_values("_orig_idx").drop(columns=["_orig_idx", "_is_train"]).reset_index(drop=True)
                         new_te = work[work["_is_train"] == 0].sort_values("_orig_idx").drop(columns=["_orig_idx", "_is_train"]).reset_index(drop=True)
-                        # testに元々なかった列（目的変数など）を除外
                         te_keep = list(st.session_state.test_df.columns) + created_cols
                         st.session_state.train_df = new_tr
                         st.session_state.test_df = new_te[[c for c in te_keep if c in new_te.columns]]
@@ -372,93 +392,218 @@ with tab4:
                     st.success(f"時系列特徴量を {len(created_cols)} 列追加しました！: {', '.join(created_cols)}")
 
 # ==========================================
-# TAB 5: 機械学習 (LightGBM + CV)
+# TAB 5: 機械学習・評価
 # ==========================================
 with tab5:
     if st.session_state.train_df is None:
         st.info("先にタブ1でデータを読み込んでください。")
     else:
         df = st.session_state.train_df
-        c1, c2, c3 = st.columns(3)
-        target_col = c1.selectbox("目的変数 (Target)", df.columns.tolist(), index=len(df.columns)-1)
-        task_type = c2.selectbox("タスク種別", ["回帰 (RMSE)", "二値分類 (AUC)"])
-        n_splits = c3.slider("CV分割数 (K-Fold)", 3, 10, 5)
+        all_cols = df.columns.tolist()
 
-        if st.button("🚀 LightGBMで学習・CV実行"):
+        # --- 基本設定 ---
+        c1, c2, c3 = st.columns(3)
+        target_col = c1.selectbox("目的変数 (Target)", all_cols, index=len(all_cols)-1)
+        task_type = c2.selectbox("タスク種別", ["回帰", "二値分類"])
+        model_name = c3.selectbox(
+            "使用モデル",
+            ["LightGBM", "決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)", "線形モデル (Ridge / Logistic)"]
+        )
+
+        # --- 使用する特徴量カラムの選択 ---
+        default_features = [c for c in all_cols if c != target_col]
+        feature_cols = st.multiselect("学習に使う特徴量カラムを選択", default_features, default=default_features)
+
+        # --- CV・評価指標設定 ---
+        c4, c5, c6 = st.columns(3)
+        cv_type = c4.selectbox("CV（分割）方法", ["K-Fold / Stratified K-Fold（通常）", "TimeSeriesSplit（時系列分析用）"])
+        n_splits = c5.slider("CV分割数", 3, 10, 5)
+
+        if task_type == "回帰":
+            use_log1p = c6.checkbox("目的変数を log1p 変換（RMSLE最適化）", value=False)
+        else:
+            use_log1p = False
+            c6.write("")
+
+        ts_cv_sort_col = None
+        if "TimeSeriesSplit" in cv_type:
+            ts_cv_sort_col = st.selectbox("時系列CV用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
+
+        # モデル別の簡易パラメータ
+        max_depth = None
+        if model_name in ["決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)"]:
+            max_depth = st.slider("木の最大深さ (max_depth)", 2, 20, 6)
+
+        if st.button("🚀 学習・CV評価を実行"):
+            if not feature_cols:
+                st.error("学習に使う特徴量カラムを1つ以上選択してください。")
+                st.stop()
+
             try:
-                work_df = df.dropna(subset=[target_col]).reset_index(drop=True)
-                X = work_df.drop(columns=[target_col]).copy()
+                work_df = df.dropna(subset=[target_col]).copy()
+                if "TimeSeriesSplit" in cv_type and ts_cv_sort_col and ts_cv_sort_col != "並び替えない（現在の行順）":
+                    work_df = work_df.sort_values(ts_cv_sort_col)
+                work_df = work_df.reset_index(drop=True)
+
+                X = work_df[feature_cols].copy()
                 y = work_df[target_col].copy()
 
-                if "二値分類" in task_type:
-                    n_unique = y.nunique()
-                    if n_unique != 2:
-                        st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {n_unique} 個です（2個である必要があります）。回帰タスクの場合は「回帰 (RMSE)」を選んでください。")
+                # 二値分類チェック
+                if task_type == "二値分類":
+                    if y.nunique() != 2:
+                        st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {y.nunique()} 個です。")
                         st.stop()
                     if not pd.api.types.is_numeric_dtype(y):
                         y = pd.Series(pd.factorize(y)[0])
 
-                for col in X.select_dtypes(include=["object", "string"]).columns:
-                    X[col] = X[col].astype("category")
+                # RMSLE (log1p) チェック
+                if use_log1p and (y < 0).any():
+                    st.error("目的変数に負の値が含まれているため、log1p変換（RMSLE最適化）は使用できません。")
+                    st.stop()
 
-                oof_preds = np.zeros(len(work_df))
-                importances = np.zeros(X.shape[1])
-
+                # テストデータ準備
                 if mode == "コンペ用モード" and st.session_state.test_df is not None:
-                    X_test = st.session_state.test_df[X.columns].copy()
-                    for col in X_test.select_dtypes(include=["object", "string"]).columns:
-                        X_test[col] = X_test[col].astype("category")
-                    test_preds = np.zeros(len(X_test))
+                    missing_in_test = [c for c in feature_cols if c not in st.session_state.test_df.columns]
+                    if missing_in_test:
+                        st.error(f"testデータに以下の選択カラムが存在しません: {missing_in_test}")
+                        st.stop()
+                    X_test = st.session_state.test_df[feature_cols].copy()
                 else:
-                    X_test, test_preds = None, None
+                    X_test = None
 
-                kf = KFold(n_splits=n_splits, shuffle=True, random_state=42) if "回帰" in task_type else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                # モデル別の型処理
+                if model_name == "LightGBM":
+                    for col in X.select_dtypes(include=["object", "string"]).columns:
+                        X[col] = X[col].astype("category")
+                        if X_test is not None:
+                            X_test[col] = X_test[col].astype("category")
+                else:
+                    # 決定木・RF・線形モデルはカテゴリを数値化＆欠損を中央値補完
+                    for col in X.columns:
+                        if not pd.api.types.is_numeric_dtype(X[col]):
+                            cat_type = X[col].astype("category")
+                            X[col] = cat_type.cat.codes
+                            if X_test is not None:
+                                X_test[col] = pd.Categorical(X_test[col], categories=cat_type.cat.categories).codes
+                        med = X[col].median()
+                        med = 0 if pd.isna(med) else med
+                        X[col] = X[col].fillna(med)
+                        if X_test is not None:
+                            X_test[col] = X_test[col].fillna(med)
+
+                # CV分割器
+                if "TimeSeriesSplit" in cv_type:
+                    splitter = TimeSeriesSplit(n_splits=n_splits)
+                    splits = list(splitter.split(X))
+                elif task_type == "回帰":
+                    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                    splits = list(splitter.split(X))
+                else:
+                    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                    splits = list(splitter.split(X, y))
+
+                oof_preds = np.full(len(work_df), np.nan)
+                test_preds = np.zeros(len(X_test)) if X_test is not None else None
+                importances = np.zeros(len(feature_cols))
 
                 progress = st.progress(0)
-                for fold, (tr_idx, va_idx) in enumerate(kf.split(X, y)):
+                for fold, (tr_idx, va_idx) in enumerate(splits):
                     X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
                     X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
 
-                    if "回帰" in task_type:
-                        model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                    y_tr_fit = np.log1p(y_tr) if use_log1p else y_tr
+                    y_va_fit = np.log1p(y_va) if use_log1p else y_va
+
+                    # モデル定義
+                    if model_name == "LightGBM":
+                        if task_type == "回帰":
+                            model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                        else:
+                            model = lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                        model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
+                    elif model_name == "決定木 (DecisionTree)":
+                        model = DecisionTreeRegressor(max_depth=max_depth, random_state=42 + fold) if task_type == "回帰" else DecisionTreeClassifier(max_depth=max_depth, random_state=42 + fold)
+                        model.fit(X_tr, y_tr_fit)
+                    elif model_name == "ランダムフォレスト (RandomForest)":
+                        model = RandomForestRegressor(n_estimators=100, max_depth=max_depth, random_state=42 + fold, n_jobs=-1) if task_type == "回帰" else RandomForestClassifier(n_estimators=100, max_depth=max_depth, random_state=42 + fold, n_jobs=-1)
+                        model.fit(X_tr, y_tr_fit)
                     else:
-                        model = lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                        if task_type == "回帰":
+                            model = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+                        else:
+                            model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
+                        model.fit(X_tr, y_tr_fit)
 
-                    model.fit(
-                        X_tr, y_tr,
-                        eval_set=[(X_va, y_va)],
-                        callbacks=[lgb.early_stopping(50, verbose=False)]
-                    )
-
-                    if "回帰" in task_type:
-                        oof_preds[va_idx] = model.predict(X_va)
+                    # 予測
+                    if task_type == "回帰":
+                        va_pred = model.predict(X_va)
+                        if use_log1p:
+                            va_pred = np.expm1(np.clip(va_pred, -10, 50))
+                        oof_preds[va_idx] = va_pred
                         if X_test is not None:
-                            test_preds += model.predict(X_test) / n_splits
+                            t_pred = model.predict(X_test)
+                            if use_log1p:
+                                t_pred = np.expm1(np.clip(t_pred, -10, 50))
+                            test_preds += t_pred / len(splits)
                     else:
                         oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
                         if X_test is not None:
-                            test_preds += model.predict_proba(X_test)[:, 1] / n_splits
+                            test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
 
-                    importances += model.feature_importances_ / n_splits
-                    progress.progress((fold + 1) / n_splits)
+                    # 重要度取得
+                    if hasattr(model, "feature_importances_"):
+                        importances += model.feature_importances_ / len(splits)
+                    elif hasattr(model, "named_steps"):
+                        est = list(model.named_steps.values())[-1]
+                        coef = np.abs(est.coef_).ravel()
+                        importances += coef / len(splits)
 
-                if "回帰" in task_type:
-                    score = root_mean_squared_error(y, oof_preds)
-                    st.metric("OOF RMSE（低いほど良い）", f"{score:.5f}")
+                    progress.progress((fold + 1) / len(splits))
+
+                # --- 評価指標の一覧表示 ---
+                valid_mask = ~np.isnan(oof_preds)
+                y_eval = y[valid_mask]
+                p_eval = oof_preds[valid_mask]
+
+                st.write("### 📈 評価スコア (OOF)")
+                if task_type == "回帰":
+                    rmse = root_mean_squared_error(y_eval, p_eval)
+                    mae = mean_absolute_error(y_eval, p_eval)
+                    r2 = r2_score(y_eval, p_eval)
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("RMSE（低いほど良い）", f"{rmse:.5f}")
+                    m2.metric("MAE（低いほど良い）", f"{mae:.5f}")
+                    m3.metric("R²（1に近いほど良い）", f"{r2:.5f}")
+                    if (y_eval >= 0).all():
+                        rmsle = root_mean_squared_log_error(y_eval, np.clip(p_eval, 0, None))
+                        m4.metric("RMSLE（低いほど良い）", f"{rmsle:.5f}")
+                    else:
+                        m4.metric("RMSLE", "負の値あり算出不可")
                 else:
-                    score = roc_auc_score(y, oof_preds)
-                    st.metric("OOF ROC-AUC（高いほど良い）", f"{score:.5f}")
+                    auc = roc_auc_score(y_eval, p_eval)
+                    pred_cls = (p_eval >= 0.5).astype(int)
+                    acc = accuracy_score(y_eval, pred_cls)
+                    f1 = f1_score(y_eval, pred_cls, zero_division=0)
+                    ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15))
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("ROC-AUC（高いほど良い）", f"{auc:.5f}")
+                    m2.metric("Accuracy", f"{acc:.5f}")
+                    m3.metric("F1 Score", f"{f1:.5f}")
+                    m4.metric("LogLoss（低いほど良い）", f"{ll:.5f}")
 
-                imp_df = pd.DataFrame({"特徴量": X.columns, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
-                fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title="特徴量重要度 (Top 20)")
+                # --- 特徴量重要度 ---
+                imp_title = "特徴量重要度 (Top 20)" if model_name != "線形モデル (Ridge / Logistic)" else "回帰係数の絶対値 (Top 20)"
+                imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
+                fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title=imp_title)
                 st.plotly_chart(fig_imp, use_container_width=True)
 
+                # --- コンペ用提出ファイル ---
                 if test_preds is not None:
                     sub_df = pd.DataFrame({"prediction": test_preds})
                     st.download_button(
                         "📥 予測結果 (submission.csv) をダウンロード",
                         data=sub_df.to_csv(index=False).encode("utf-8"),
-                        file_name="submission.csv",
+                        file_name=f"submission_{model_name.split()[0]}.csv",
                         mime="text/csv"
                     )
             except Exception as e:
