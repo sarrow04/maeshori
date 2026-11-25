@@ -106,7 +106,7 @@ def render_live_preview():
     if not datasets:
         return
     tr_info = f"Train: {st.session_state.train_df.shape[0]:,}行 × {st.session_state.train_df.shape[1]}列" if st.session_state.train_df is not None else f"登録データ: {len(datasets)}件"
-    label = f"⚡ リアルタイム確認：基本統計量 & 10行プレビュー（{tr_info}）"
+    label = f"⚡ リアルタイム確認：基本統計量 & 10行プレビュー（{tr_info} / 全{len(datasets)}データ）"
     with st.expander(label, expanded=False):
         c1, c2 = st.columns(2)
         view_target = c1.selectbox("表示するデータ", list(datasets.keys()), key="live_view_target")
@@ -322,6 +322,7 @@ for key, default_val in [
     ("test_df", None),
     ("test_raw_df", None),
     ("extra_dfs", {}),
+    ("loaded_normal_files", set()),
     ("sub_template_df", None),
     ("sub_has_header", True),
     ("test_preds", None),
@@ -382,25 +383,54 @@ with tab1:
     if t1_mode == "1. 読み込み・概要":
         st.subheader("データのアップロード（CSV / Parquet / ZIP対応）")
 
-        if mode == "コンペ用モード":
-            col1, col2, col3 = st.columns(3)
+        if mode == "通常分析モード":
+            uploaded_files = st.file_uploader(
+                "分析用データをアップロード（複数ファイル同時選択可）",
+                type=["csv", "parquet", "zip"],
+                accept_multiple_files=True,
+                key="normal_multi_uploader"
+            )
+            if uploaded_files:
+                added_names = []
+                for f in uploaded_files:
+                    if f.name not in st.session_state.loaded_normal_files:
+                        try:
+                            df_loaded, start_m, end_m = load_file(f)
+                            if st.session_state.train_df is None:
+                                st.session_state.train_df = df_loaded.copy()
+                                added_names.append(f"train ({f.name})")
+                            else:
+                                base_name = os.path.splitext(f.name)[0]
+                                ds_name = base_name if base_name not in ["train", "test"] else f"{base_name}_2"
+                                st.session_state.extra_dfs[ds_name] = df_loaded.copy()
+                                added_names.append(ds_name)
+                            st.session_state.loaded_normal_files.add(f.name)
+                        except Exception as e:
+                            st.error(f"{f.name} の読み込みエラー: {e}")
+
+                if added_names:
+                    notify_and_refresh(f"ファイルを読み込みました: {', '.join(added_names)}")
+
+                if st.button("選択中のファイルを初期状態に再読み込み"):
+                    st.session_state.train_df = None
+                    st.session_state.extra_dfs = {}
+                    st.session_state.loaded_normal_files = set()
+                    st.rerun()
+
         else:
-            col1 = st.container()
-            col2, col3 = None, None
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                train_file = st.file_uploader("学習用データ (train)", type=["csv", "parquet", "zip"])
+                if train_file:
+                    try:
+                        df, start_m, end_m = load_file(train_file)
+                        if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
+                            st.session_state.train_df = df.copy()
+                            notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+                        st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+                    except Exception as e:
+                        st.error(f"Train読み込みエラー: {e}")
 
-        with col1:
-            train_file = st.file_uploader("学習用 / 分析用データ (train)", type=["csv", "parquet", "zip"])
-            if train_file:
-                try:
-                    df, start_m, end_m = load_file(train_file)
-                    if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
-                        st.session_state.train_df = df.copy()
-                        notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
-                    st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
-                except Exception as e:
-                    st.error(f"Train読み込みエラー: {e}")
-
-        if mode == "コンペ用モード":
             with col2:
                 test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet", "zip"])
                 if test_file:
@@ -426,78 +456,85 @@ with tab1:
                     except Exception as e:
                         st.error(f"Submit読み込みエラー: {e}")
 
+        datasets = get_all_datasets()
+
+        # --- 通常・コンペ共通：2データ間の文字列カラム非共通ユニーク値チェック ---
+        if len(datasets) >= 2:
+            st.divider()
+            st.write("### 🔍 2データ間の差異チェック（文字列カラムの非共通ユニーク値）")
+            ds_names = list(datasets.keys())
+            dc1, dc2 = st.columns(2)
+            cmp_a_name = dc1.selectbox("比較元データ (A)", ds_names, index=0, key="cmp_a_name")
+            cmp_b_name = dc2.selectbox("比較先データ (B)", ds_names, index=1, key="cmp_b_name")
+
+            df_a = datasets[cmp_a_name]
+            df_b = datasets[cmp_b_name]
+
+            str_common_cols = [
+                c for c in df_a.columns
+                if c in df_b.columns and (
+                    pd.api.types.is_object_dtype(df_a[c])
+                    or pd.api.types.is_string_dtype(df_a[c])
+                    or isinstance(df_a[c].dtype, pd.CategoricalDtype)
+                )
+            ]
+
+            diff_summary = []
+            diff_details = {}
+            for c in str_common_cols:
+                a_u = set(df_a[c].dropna().astype(str).unique())
+                b_u = set(df_b[c].dropna().astype(str).unique())
+                a_only = sorted(a_u - b_u)
+                b_only = sorted(b_u - a_u)
+                if len(a_only) > 0 or len(b_only) > 0:
+                    diff_summary.append({
+                        "カラム名": c,
+                        "共通ユニーク数": len(a_u & b_u),
+                        f"{cmp_a_name}のみ(個)": len(a_only),
+                        f"{cmp_b_name}のみ(個)": len(b_only),
+                        f"{cmp_a_name}のみの値(一部)": ", ".join(a_only[:5]),
+                        f"{cmp_b_name}のみの値(一部)": ", ".join(b_only[:5]),
+                    })
+                    diff_details[c] = (a_only, b_only)
+
+            if diff_summary:
+                diff_summary_df = pd.DataFrame(diff_summary)
+                st.warning(f"「{cmp_a_name}」と「{cmp_b_name}」の文字列カラムのうち **{len(diff_summary_df)}列** で非共通の値が見つかりました。")
+                st.dataframe(diff_summary_df, use_container_width=True)
+
+                sel_diff_col = st.selectbox("非共通の値をすべて見るカラムを選択", list(diff_details.keys()), key="sel_diff_col")
+                if sel_diff_col:
+                    a_only, b_only = diff_details[sel_diff_col]
+                    detail_rows = (
+                        [{"区分": f"{cmp_b_name}のみ", "値": v} for v in b_only]
+                        + [{"区分": f"{cmp_a_name}のみ", "値": v} for v in a_only]
+                    )
+                    detail_df = pd.DataFrame(detail_rows)
+                    st.caption(f"「{sel_diff_col}」の非共通値: {cmp_b_name}のみ {len(b_only):,}個 / {cmp_a_name}のみ {len(a_only):,}個")
+                    st.dataframe(detail_df, use_container_width=True)
+
+                    b1, b2 = st.columns(2)
+                    b1.download_button(
+                        f"📥 「{sel_diff_col}」の非共通値一覧をCSV出力",
+                        data=detail_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"diff_unique_{sel_diff_col}.csv",
+                        mime="text/csv",
+                        key="dl_diff_detail_csv"
+                    )
+                    b2.download_button(
+                        "📥 全カラムの非共通サマリーをCSV出力",
+                        data=diff_summary_df.to_csv(index=False).encode("utf-8"),
+                        file_name="diff_unique_summary.csv",
+                        mime="text/csv",
+                        key="dl_diff_summary_csv"
+                    )
+            else:
+                st.success(f"「{cmp_a_name}」と「{cmp_b_name}」の文字列カラムに非共通ユニーク値はありませんでした。")
+
         if st.session_state.train_df is not None:
             df_show = st.session_state.train_df
-
-            # --- コンペ用モード限定：文字列カラムのTrain/Test非共通ユニーク値チェック ---
-            if mode == "コンペ用モード" and st.session_state.test_df is not None:
-                st.divider()
-                st.write("### 🔍 【コンペ用】文字列カラムのTrain / Test 非共通ユニーク値")
-                te_show = st.session_state.test_df
-
-                str_common_cols = [
-                    c for c in df_show.columns
-                    if c in te_show.columns and (
-                        pd.api.types.is_object_dtype(df_show[c])
-                        or pd.api.types.is_string_dtype(df_show[c])
-                        or isinstance(df_show[c].dtype, pd.CategoricalDtype)
-                    )
-                ]
-
-                diff_summary = []
-                diff_details = {}
-                for c in str_common_cols:
-                    tr_u = set(df_show[c].dropna().astype(str).unique())
-                    te_u = set(te_show[c].dropna().astype(str).unique())
-                    tr_only = sorted(tr_u - te_u)
-                    te_only = sorted(te_u - tr_u)
-                    if len(tr_only) > 0 or len(te_only) > 0:
-                        diff_summary.append({
-                            "カラム名": c,
-                            "共通ユニーク数": len(tr_u & te_u),
-                            "Trainのみ(個)": len(tr_only),
-                            "Testのみ(個)": len(te_only),
-                            "Trainのみの値(一部)": ", ".join(tr_only[:5]),
-                            "Testのみの値(一部)": ", ".join(te_only[:5]),
-                        })
-                        diff_details[c] = (tr_only, te_only)
-
-                if diff_summary:
-                    diff_summary_df = pd.DataFrame(diff_summary)
-                    st.warning(f"文字列カラムのうち **{len(diff_summary_df)}列** で、TrainとTestに共通していない値が見つかりました。")
-                    st.dataframe(diff_summary_df, use_container_width=True)
-
-                    sel_diff_col = st.selectbox("非共通の値をすべて見るカラムを選択", list(diff_details.keys()), key="sel_diff_col")
-                    if sel_diff_col:
-                        tr_only, te_only = diff_details[sel_diff_col]
-                        detail_rows = (
-                            [{"区分": "Testのみ（未知の値）", "値": v} for v in te_only]
-                            + [{"区分": "Trainのみ", "値": v} for v in tr_only]
-                        )
-                        detail_df = pd.DataFrame(detail_rows)
-                        st.caption(f"「{sel_diff_col}」の非共通値: Testのみ {len(te_only):,}個 / Trainのみ {len(tr_only):,}個")
-                        st.dataframe(detail_df, use_container_width=True)
-
-                        b1, b2 = st.columns(2)
-                        b1.download_button(
-                            f"📥 「{sel_diff_col}」の非共通値一覧をCSV出力",
-                            data=detail_df.to_csv(index=False).encode("utf-8"),
-                            file_name=f"diff_unique_{sel_diff_col}.csv",
-                            mime="text/csv",
-                            key="dl_diff_detail_csv"
-                        )
-                        b2.download_button(
-                            "📥 全カラムの非共通サマリーをCSV出力",
-                            data=diff_summary_df.to_csv(index=False).encode("utf-8"),
-                            file_name="diff_unique_summary.csv",
-                            mime="text/csv",
-                            key="dl_diff_summary_csv"
-                        )
-                else:
-                    st.success("文字列カラムにTrain / Test間の非共通ユニーク値はありませんでした。")
-
             st.divider()
-            st.write("### カラム概要（型・欠損・ユニーク数）")
+            st.write("### カラム概要（型・欠損・ユニーク数：Train）")
             top_vals = []
             for c in df_show.columns:
                 vc = df_show[c].value_counts(dropna=False).head(3)
@@ -558,7 +595,6 @@ with tab1:
                 })
             st.dataframe(pd.DataFrame(list_rows), use_container_width=True)
 
-            # 個別操作
             sel_ds = st.selectbox("保存・削除するデータを選択", list(datasets.keys()), key="manage_sel_ds")
             target_df = datasets[sel_ds]
 
@@ -1475,7 +1511,6 @@ with tab5:
                         if X_test is not None:
                             X_test[col] = X_test[col].fillna(med)
 
-                # --- 分割インデックスの作成 ---
                 if "Hold-out" in cv_type:
                     strat_arg = y if task_type == "二値分類" else None
                     tr_idx, va_idx = train_test_split(np.arange(len(work_df)), test_size=val_ratio, random_state=42, stratify=strat_arg)
