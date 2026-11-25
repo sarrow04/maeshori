@@ -131,6 +131,46 @@ def encode_latlon_to_mesh(lat_s, lon_s, level=4):
     res.loc[valid] = codes
     return res
 
+# --- モデル生成関数（チューニングプリセット対応） ---
+def build_model(model_name, task_type, preset, seed):
+    if model_name == "LightGBM":
+        params = {
+            "浅い（過学習防止）": dict(n_estimators=1000, learning_rate=0.05, max_depth=4, num_leaves=15, min_child_samples=30, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
+            "標準（バランス）": dict(n_estimators=1000, learning_rate=0.05, max_depth=-1, num_leaves=31, min_child_samples=20, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
+            "深い（表現力重視）": dict(n_estimators=1000, learning_rate=0.05, max_depth=10, num_leaves=63, min_child_samples=10, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
+            "高精度・じっくり（コンペ向け）": dict(n_estimators=2000, learning_rate=0.02, max_depth=7, num_leaves=31, min_child_samples=20, colsample_bytree=0.7, subsample=0.8, subsample_freq=1, reg_alpha=0.1, reg_lambda=1.0),
+        }[preset]
+        cls = lgb.LGBMRegressor if task_type == "回帰" else lgb.LGBMClassifier
+        return cls(random_state=seed, n_jobs=-1, verbose=-1, **params)
+
+    elif model_name == "決定木 (DecisionTree)":
+        params = {
+            "浅い（過学習防止）": dict(max_depth=3, min_samples_leaf=10),
+            "標準（バランス）": dict(max_depth=6, min_samples_leaf=5),
+            "深い（表現力重視）": dict(max_depth=12, min_samples_leaf=2),
+            "高精度・じっくり（コンペ向け）": dict(max_depth=8, min_samples_leaf=5),
+        }[preset]
+        cls = DecisionTreeRegressor if task_type == "回帰" else DecisionTreeClassifier
+        return cls(random_state=seed, **params)
+
+    elif model_name == "ランダムフォレスト (RandomForest)":
+        params = {
+            "浅い（過学習防止）": dict(n_estimators=100, max_depth=4, min_samples_leaf=5),
+            "標準（バランス）": dict(n_estimators=100, max_depth=8, min_samples_leaf=2),
+            "深い（表現力重視）": dict(n_estimators=150, max_depth=15, min_samples_leaf=1),
+            "高精度・じっくり（コンペ向け）": dict(n_estimators=300, max_depth=12, min_samples_leaf=2),
+        }[preset]
+        cls = RandomForestRegressor if task_type == "回帰" else RandomForestClassifier
+        return cls(random_state=seed, n_jobs=-1, **params)
+
+    else:
+        if task_type == "回帰":
+            alpha = {"浅い（過学習防止）": 10.0, "標準（バランス）": 1.0, "深い（表現力重視）": 0.1, "高精度・じっくり（コンペ向け）": 0.5}[preset]
+            return make_pipeline(StandardScaler(), Ridge(alpha=alpha))
+        else:
+            c_val = {"浅い（過学習防止）": 0.1, "標準（バランス）": 1.0, "深い（表現力重視）": 10.0, "高精度・じっくり（コンペ向け）": 2.0}[preset]
+            return make_pipeline(StandardScaler(), LogisticRegression(C=c_val, max_iter=1000))
+
 # --- サイドバー：モード切替 ---
 st.sidebar.title("⚙️ アプリ設定")
 mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
@@ -694,7 +734,6 @@ with tab4:
                         else:
                             ext_sub = ext_df[[right_key] + add_cols].copy()
                             ext_sub["_join_key"] = ext_sub[right_key].astype(str).str.split(".").str[0].str.strip()
-                            # 同一メッシュに複数行ある場合は先頭1件（重複による行数増加を防止）
                             ext_sub = ext_sub.drop_duplicates(subset=["_join_key"]).drop(columns=[right_key])
 
                             def apply_ext_join(target_df):
@@ -711,7 +750,7 @@ with tab4:
                             st.success(f"外部データから {len(add_cols)} 列を結合しました！")
 
 # ==========================================
-# TAB 5: 機械学習・評価
+# TAB 5: 機械学習・評価（チューニングプリセット対応）
 # ==========================================
 with tab5:
     if st.session_state.train_df is None:
@@ -726,6 +765,18 @@ with tab5:
         model_name = c3.selectbox(
             "使用モデル",
             ["LightGBM", "決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)", "線形モデル (Ridge / Logistic)"]
+        )
+
+        # チューニングパターン選択
+        tune_preset = st.selectbox(
+            "チューニング設定（浅い・深いなど）",
+            [
+                "標準（バランス）",
+                "浅い（過学習防止）",
+                "深い（表現力重視）",
+                "高精度・じっくり（コンペ向け）",
+                "🔥 全パターン一括比較（浅い・標準・深い）"
+            ]
         )
 
         default_features = [c for c in all_cols if c != target_col]
@@ -744,10 +795,6 @@ with tab5:
         ts_cv_sort_col = None
         if "TimeSeriesSplit" in cv_type:
             ts_cv_sort_col = st.selectbox("時系列CV用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
-
-        max_depth = None
-        if model_name in ["決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)"]:
-            max_depth = st.slider("木の最大深さ (max_depth)", 2, 20, 6)
 
         if st.button("🚀 学習・CV評価を実行"):
             if not feature_cols:
@@ -811,102 +858,122 @@ with tab5:
                     splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
                     splits = list(splitter.split(X, y))
 
-                oof_preds = np.full(len(work_df), np.nan)
-                test_preds = np.zeros(len(X_test)) if X_test is not None else None
-                importances = np.zeros(len(feature_cols))
+                # 実行するプリセットのリスト
+                presets_to_run = (
+                    ["浅い（過学習防止）", "標準（バランス）", "深い（表現力重視）"]
+                    if "一括比較" in tune_preset
+                    else [tune_preset]
+                )
 
+                results = []
+                total_steps = len(presets_to_run) * len(splits)
+                step_cnt = 0
                 progress = st.progress(0)
-                for fold, (tr_idx, va_idx) in enumerate(splits):
-                    X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
-                    X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
 
-                    y_tr_fit = np.log1p(y_tr) if use_log1p else y_tr
-                    y_va_fit = np.log1p(y_va) if use_log1p else y_va
+                for preset in presets_to_run:
+                    oof_preds = np.full(len(work_df), np.nan)
+                    test_preds = np.zeros(len(X_test)) if X_test is not None else None
+                    importances = np.zeros(len(feature_cols))
 
-                    if model_name == "LightGBM":
-                        if task_type == "回帰":
-                            model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                    for fold, (tr_idx, va_idx) in enumerate(splits):
+                        X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+                        X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
+
+                        y_tr_fit = np.log1p(y_tr) if use_log1p else y_tr
+                        y_va_fit = np.log1p(y_va) if use_log1p else y_va
+
+                        model = build_model(model_name, task_type, preset, 42 + fold)
+
+                        if model_name == "LightGBM":
+                            model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
                         else:
-                            model = lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
-                        model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
-                    elif model_name == "決定木 (DecisionTree)":
-                        model = DecisionTreeRegressor(max_depth=max_depth, random_state=42 + fold) if task_type == "回帰" else DecisionTreeClassifier(max_depth=max_depth, random_state=42 + fold)
-                        model.fit(X_tr, y_tr_fit)
-                    elif model_name == "ランダムフォレスト (RandomForest)":
-                        model = RandomForestRegressor(n_estimators=100, max_depth=max_depth, random_state=42 + fold, n_jobs=-1) if task_type == "回帰" else RandomForestClassifier(n_estimators=100, max_depth=max_depth, random_state=42 + fold, n_jobs=-1)
-                        model.fit(X_tr, y_tr_fit)
-                    else:
+                            model.fit(X_tr, y_tr_fit)
+
                         if task_type == "回帰":
-                            model = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+                            va_pred = model.predict(X_va)
+                            if use_log1p:
+                                va_pred = np.expm1(np.clip(va_pred, -10, 50))
+                            oof_preds[va_idx] = va_pred
+                            if X_test is not None:
+                                t_pred = model.predict(X_test)
+                                if use_log1p:
+                                    t_pred = np.expm1(np.clip(t_pred, -10, 50))
+                                test_preds += t_pred / len(splits)
                         else:
-                            model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
-                        model.fit(X_tr, y_tr_fit)
+                            oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
+                            if X_test is not None:
+                                test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
+
+                        if hasattr(model, "feature_importances_"):
+                            importances += model.feature_importances_ / len(splits)
+                        elif hasattr(model, "named_steps"):
+                            est = list(model.named_steps.values())[-1]
+                            coef = np.abs(est.coef_).ravel()
+                            importances += coef / len(splits)
+
+                        step_cnt += 1
+                        progress.progress(step_cnt / total_steps)
+
+                    valid_mask = ~np.isnan(oof_preds)
+                    y_eval = y[valid_mask]
+                    p_eval = oof_preds[valid_mask]
 
                     if task_type == "回帰":
-                        va_pred = model.predict(X_va)
-                        if use_log1p:
-                            va_pred = np.expm1(np.clip(va_pred, -10, 50))
-                        oof_preds[va_idx] = va_pred
-                        if X_test is not None:
-                            t_pred = model.predict(X_test)
-                            if use_log1p:
-                                t_pred = np.expm1(np.clip(t_pred, -10, 50))
-                            test_preds += t_pred / len(splits)
+                        rmse = root_mean_squared_error(y_eval, p_eval)
+                        mae = mean_absolute_error(y_eval, p_eval)
+                        r2 = r2_score(y_eval, p_eval)
+                        rmsle = root_mean_squared_log_error(y_eval, np.clip(p_eval, 0, None)) if (y_eval >= 0).all() else np.nan
+                        main_score = rmsle if (use_log1p and not np.isnan(rmsle)) else rmse
+                        results.append({
+                            "設定": preset, "RMSE": rmse, "MAE": mae, "R2": r2, "RMSLE": rmsle,
+                            "_key": main_score, "_test_preds": test_preds, "_imp": importances
+                        })
                     else:
-                        oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
-                        if X_test is not None:
-                            test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
+                        auc = roc_auc_score(y_eval, p_eval)
+                        pred_cls = (p_eval >= 0.5).astype(int)
+                        acc = accuracy_score(y_eval, pred_cls)
+                        f1 = f1_score(y_eval, pred_cls, zero_division=0)
+                        ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15))
+                        results.append({
+                            "設定": preset, "ROC-AUC": auc, "Accuracy": acc, "F1": f1, "LogLoss": ll,
+                            "_key": -auc, "_test_preds": test_preds, "_imp": importances
+                        })
 
-                    if hasattr(model, "feature_importances_"):
-                        importances += model.feature_importances_ / len(splits)
-                    elif hasattr(model, "named_steps"):
-                        est = list(model.named_steps.values())[-1]
-                        coef = np.abs(est.coef_).ravel()
-                        importances += coef / len(splits)
+                # 最良パターンの決定（_keyが小さいほど良い）
+                best_res = min(results, key=lambda x: x["_key"])
 
-                    progress.progress((fold + 1) / len(splits))
+                if len(results) > 1:
+                    st.write("### 🏆 チューニングパターン一括比較")
+                    comp_cols = ["設定", "RMSE", "MAE", "R2", "RMSLE"] if task_type == "回帰" else ["設定", "ROC-AUC", "Accuracy", "F1", "LogLoss"]
+                    comp_df = pd.DataFrame([{k: r[k] for k in comp_cols} for r in results])
+                    st.dataframe(comp_df, use_container_width=True)
+                    st.success(f"最良パターン: **{best_res['設定']}** の予測結果を採用しました！")
 
-                if test_preds is not None:
-                    st.session_state.test_preds = test_preds
-                    st.session_state.last_model_name = model_name.split()[0]
+                if best_res["_test_preds"] is not None:
+                    st.session_state.test_preds = best_res["_test_preds"]
+                    st.session_state.last_model_name = f"{model_name.split()[0]}_{best_res['設定'].split('（')[0]}"
                     st.session_state.last_task_type = task_type
 
-                valid_mask = ~np.isnan(oof_preds)
-                y_eval = y[valid_mask]
-                p_eval = oof_preds[valid_mask]
-
-                st.write("### 📈 評価スコア (OOF)")
+                st.write(f"### 📈 評価スコア (OOF: {best_res['設定']})")
                 if task_type == "回帰":
-                    rmse = root_mean_squared_error(y_eval, p_eval)
-                    mae = mean_absolute_error(y_eval, p_eval)
-                    r2 = r2_score(y_eval, p_eval)
                     m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("RMSE（低いほど良い）", f"{rmse:.5f}")
-                    m2.metric("MAE（低いほど良い）", f"{mae:.5f}")
-                    m3.metric("R²（1に近いほど良い）", f"{r2:.5f}")
-                    if (y_eval >= 0).all():
-                        rmsle = root_mean_squared_log_error(y_eval, np.clip(p_eval, 0, None))
-                        m4.metric("RMSLE（低いほど良い）", f"{rmsle:.5f}")
-                    else:
-                        m4.metric("RMSLE", "負の値あり算出不可")
+                    m1.metric("RMSE（低いほど良い）", f"{best_res['RMSE']:.5f}")
+                    m2.metric("MAE（低いほど良い）", f"{best_res['MAE']:.5f}")
+                    m3.metric("R²（1に近いほど良い）", f"{best_res['R2']:.5f}")
+                    m4.metric("RMSLE（低いほど良い）", f"{best_res['RMSLE']:.5f}" if not np.isnan(best_res["RMSLE"]) else "算出不可")
                 else:
-                    auc = roc_auc_score(y_eval, p_eval)
-                    pred_cls = (p_eval >= 0.5).astype(int)
-                    acc = accuracy_score(y_eval, pred_cls)
-                    f1 = f1_score(y_eval, pred_cls, zero_division=0)
-                    ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15))
                     m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("ROC-AUC（高いほど良い）", f"{auc:.5f}")
-                    m2.metric("Accuracy", f"{acc:.5f}")
-                    m3.metric("F1 Score", f"{f1:.5f}")
-                    m4.metric("LogLoss（低いほど良い）", f"{ll:.5f}")
+                    m1.metric("ROC-AUC（高いほど良い）", f"{best_res['ROC-AUC']:.5f}")
+                    m2.metric("Accuracy", f"{best_res['Accuracy']:.5f}")
+                    m3.metric("F1 Score", f"{best_res['F1']:.5f}")
+                    m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
 
-                imp_title = "特徴量重要度 (Top 20)" if model_name != "線形モデル (Ridge / Logistic)" else "回帰係数の絶対値 (Top 20)"
-                imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
+                imp_title = f"特徴量重要度 Top 20 ({best_res['設定']})" if model_name != "線形モデル (Ridge / Logistic)" else f"回帰係数の絶対値 Top 20 ({best_res['設定']})"
+                imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": best_res["_imp"]}).sort_values("重要度", ascending=True).tail(20)
                 fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title=imp_title)
                 st.plotly_chart(fig_imp, use_container_width=True)
 
-                if test_preds is not None:
+                if best_res["_test_preds"] is not None:
                     st.info("予測結果を保存しました！「6. 提出・データ出力 (Submit)」タブから提出ファイルをダウンロードできます。")
 
             except Exception as e:
