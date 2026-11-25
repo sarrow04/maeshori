@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -21,6 +22,59 @@ from sklearn.metrics import (
 )
 
 st.set_page_config(page_title="Data Analysis & Competition App", layout="wide")
+
+# --- 自動保存（バックアップ）用パス ---
+AUTOSAVE_DIR = ".autosave_cache"
+os.makedirs(AUTOSAVE_DIR, exist_ok=True)
+TRAIN_CACHE_PATH = os.path.join(AUTOSAVE_DIR, "train_backup.parquet")
+TEST_CACHE_PATH = os.path.join(AUTOSAVE_DIR, "test_backup.parquet")
+
+def save_backup():
+    try:
+        if st.session_state.train_df is not None:
+            st.session_state.train_df.to_parquet(TRAIN_CACHE_PATH, index=False)
+        if st.session_state.test_df is not None:
+            st.session_state.test_df.to_parquet(TEST_CACHE_PATH, index=False)
+    except Exception:
+        pass
+
+def render_custom_save_ui(key_prefix):
+    st.divider()
+    st.write("### 💾 現在のデータを名前を付けて保存")
+    c1, c2 = st.columns(2)
+    with c1:
+        tr_name = st.text_input("Trainのファイル名（拡張子不要）", value="train_processed", key=f"{key_prefix}_tr_name")
+        b1, b2 = st.columns(2)
+        b1.download_button(
+            "📥 Train (CSV)",
+            data=st.session_state.train_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"{tr_name}.csv",
+            mime="text/csv",
+            key=f"{key_prefix}_tr_csv"
+        )
+        b2.download_button(
+            "📥 Train (Parquet)",
+            data=st.session_state.train_df.to_parquet(index=False),
+            file_name=f"{tr_name}.parquet",
+            key=f"{key_prefix}_tr_pq"
+        )
+    with c2:
+        if st.session_state.test_df is not None:
+            te_name = st.text_input("Testのファイル名（拡張子不要）", value="test_processed", key=f"{key_prefix}_te_name")
+            b3, b4 = st.columns(2)
+            b3.download_button(
+                "📥 Test (CSV)",
+                data=st.session_state.test_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{te_name}.csv",
+                mime="text/csv",
+                key=f"{key_prefix}_te_csv"
+            )
+            b4.download_button(
+                "📥 Test (Parquet)",
+                data=st.session_state.test_df.to_parquet(index=False),
+                file_name=f"{te_name}.parquet",
+                key=f"{key_prefix}_te_pq"
+            )
 
 # --- メモリ軽量化関数 ---
 def reduce_mem_usage(df):
@@ -171,12 +225,7 @@ def build_model(model_name, task_type, preset, seed):
             c_val = {"浅い（過学習防止）": 0.1, "標準（バランス）": 1.0, "深い（表現力重視）": 10.0, "高精度・じっくり（コンペ向け）": 2.0}[preset]
             return make_pipeline(StandardScaler(), LogisticRegression(C=c_val, max_iter=1000))
 
-# --- サイドバー：モード切替 ---
-st.sidebar.title("⚙️ アプリ設定")
-mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
-st.title(f"📊 データ分析・MLアプリ（{mode}）")
-
-# セッション状態の初期化
+# --- セッション状態の初期化 ---
 for key, default_val in [
     ("train_df", None),
     ("test_df", None),
@@ -189,6 +238,24 @@ for key, default_val in [
 ]:
     if key not in st.session_state:
         st.session_state[key] = default_val
+
+# --- サイドバー：モード切替＆自動バックアップ復元 ---
+st.sidebar.title("⚙️ アプリ設定")
+mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
+
+st.sidebar.divider()
+st.sidebar.subheader("🛡️ データ消失対策（自動保存）")
+if os.path.exists(TRAIN_CACHE_PATH):
+    if st.sidebar.button("🔄 前回の作業データを復元"):
+        st.session_state.train_df = pd.read_parquet(TRAIN_CACHE_PATH)
+        if os.path.exists(TEST_CACHE_PATH):
+            st.session_state.test_df = pd.read_parquet(TEST_CACHE_PATH)
+            st.session_state.test_raw_df = st.session_state.test_df.copy()
+        st.sidebar.success("前回のデータを復元しました！")
+else:
+    st.sidebar.caption("データを読み込み・加工すると自動でバックアップされます。")
+
+st.title(f"📊 データ分析・MLアプリ（{mode}）")
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "1. 読み込み・概要",
@@ -217,6 +284,7 @@ with tab1:
             df, start_m, end_m = load_file(train_file)
             if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
                 st.session_state.train_df = df.copy()
+                save_backup()
             st.success(f"Train完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
 
     if mode == "コンペ用モード":
@@ -227,6 +295,7 @@ with tab1:
                 if st.session_state.test_df is None or st.button("testを初期状態にリセット"):
                     st.session_state.test_df = t_df.copy()
                     st.session_state.test_raw_df = t_df.copy()
+                    save_backup()
                 st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
 
         with col3:
@@ -372,7 +441,8 @@ with tab3:
                         st.session_state.train_df[c] = st.session_state.train_df[c].fillna(val)
                         if st.session_state.test_df is not None and c in st.session_state.test_df.columns:
                             st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
-                st.success("基本前処理を適用しました！")
+                save_backup()
+                st.success("基本前処理を適用し、自動バックアップしました！")
 
         elif prep_mode == "2. 日付・時刻の分解（年月・曜日など）":
             st.write("### 日付列を年・月・日・曜日などに分解")
@@ -411,7 +481,8 @@ with tab3:
                     st.session_state.train_df = apply_dt(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_dt(st.session_state.test_df)
-                    st.success(f"「{dt_col}」を分解しました！")
+                    save_backup()
+                    st.success(f"「{dt_col}」を分解し、自動バックアップしました！")
 
         elif prep_mode == "3. 文字列の抜き取り・加工":
             st.write("### 特定の文字列を抜き取る・フラグ化する")
@@ -478,10 +549,14 @@ with tab3:
                     st.session_state.train_df = apply_str(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_str(st.session_state.test_df)
-                    st.success(f"新しい列「{new_str_col}」を作成しました！")
+                    save_backup()
+                    st.success(f"新しい列「{new_str_col}」を作成し、自動バックアップしました！")
                     st.dataframe(st.session_state.train_df[[str_col, new_str_col]].head(5), use_container_width=True)
                 except Exception as e:
                     st.error(f"処理中にエラーが発生しました: {e}")
+
+        # 名前を付けて保存エリア
+        render_custom_save_ui("tab3")
 
 # ==========================================
 # TAB 4: 特徴量エンジニアリング
@@ -533,6 +608,7 @@ with tab4:
                     st.session_state.train_df = apply_op(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_op(st.session_state.test_df)
+                    save_backup()
                     st.success(f"特徴量「{new_col_name}」を追加しました！")
 
         elif fe_type == "2. GroupBy集約（カテゴリ別集計）":
@@ -566,6 +642,7 @@ with tab4:
                                 new_name = f"{grp_col}_{val_col}_{func}"
                                 tr[new_name] = tr.groupby(grp_col, observed=False)[val_col].transform(func).astype(np.float32)
                             st.session_state.train_df = tr
+                        save_backup()
                         st.success(f"GroupBy特徴量（{len(agg_funcs)}列）を追加しました！")
 
         elif fe_type == "3. 時系列（ラグ・差分・移動平均）":
@@ -648,6 +725,7 @@ with tab4:
                     else:
                         st.session_state.train_df = work.sort_values("_orig_idx").drop(columns=["_orig_idx"]).reset_index(drop=True)
 
+                    save_backup()
                     st.success(f"時系列特徴量を {len(created_cols)} 列追加しました！: {', '.join(created_cols)}")
 
         elif fe_type == "4. 地域メッシュ（国土交通）":
@@ -689,6 +767,7 @@ with tab4:
                     st.session_state.train_df = apply_mesh_dec(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_mesh_dec(st.session_state.test_df)
+                    save_backup()
                     st.success(f"「{mesh_col}」のメッシュ分解・変換を完了しました！")
 
             elif mesh_mode.startswith("B."):
@@ -712,6 +791,7 @@ with tab4:
                         st.session_state.train_df = apply_mesh_enc(st.session_state.train_df)
                         if st.session_state.test_df is not None:
                             st.session_state.test_df = apply_mesh_enc(st.session_state.test_df)
+                        save_backup()
                         st.success(f"メッシュコード列「{new_m_col}」を生成しました！")
 
             elif mesh_mode.startswith("C."):
@@ -747,7 +827,11 @@ with tab4:
                             st.session_state.train_df = apply_ext_join(st.session_state.train_df)
                             if st.session_state.test_df is not None:
                                 st.session_state.test_df = apply_ext_join(st.session_state.test_df)
+                            save_backup()
                             st.success(f"外部データから {len(add_cols)} 列を結合しました！")
+
+        # 名前を付けて保存エリア
+        render_custom_save_ui("tab4")
 
 # ==========================================
 # TAB 5: 機械学習・評価（チューニングプリセット対応）
@@ -767,7 +851,6 @@ with tab5:
             ["LightGBM", "決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)", "線形モデル (Ridge / Logistic)"]
         )
 
-        # チューニングパターン選択
         tune_preset = st.selectbox(
             "チューニング設定（浅い・深いなど）",
             [
@@ -858,7 +941,6 @@ with tab5:
                     splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
                     splits = list(splitter.split(X, y))
 
-                # 実行するプリセットのリスト
                 presets_to_run = (
                     ["浅い（過学習防止）", "標準（バランス）", "深い（表現力重視）"]
                     if "一括比較" in tune_preset
@@ -939,7 +1021,6 @@ with tab5:
                             "_key": -auc, "_test_preds": test_preds, "_imp": importances
                         })
 
-                # 最良パターンの決定（_keyが小さいほど良い）
                 best_res = min(results, key=lambda x: x["_key"])
 
                 if len(results) > 1:
@@ -987,41 +1068,7 @@ with tab6:
     if st.session_state.train_df is None:
         st.info("先にタブ1でデータを読み込んでください。")
     else:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write(f"**Trainデータ**: {st.session_state.train_df.shape[0]:,}行 × {st.session_state.train_df.shape[1]}列")
-            st.download_button(
-                "📥 TrainをParquetで保存（軽量・高速）",
-                data=st.session_state.train_df.to_parquet(index=False),
-                file_name="train_processed.parquet",
-                key="dl_tr_pq"
-            )
-            st.download_button(
-                "📥 TrainをCSVで保存",
-                data=st.session_state.train_df.to_csv(index=False).encode("utf-8"),
-                file_name="train_processed.csv",
-                mime="text/csv",
-                key="dl_tr_csv"
-            )
-
-        with c2:
-            if st.session_state.test_df is not None:
-                st.write(f"**Testデータ**: {st.session_state.test_df.shape[0]:,}行 × {st.session_state.test_df.shape[1]}列")
-                st.download_button(
-                    "📥 TestをParquetで保存（軽量・高速）",
-                    data=st.session_state.test_df.to_parquet(index=False),
-                    file_name="test_processed.parquet",
-                    key="dl_te_pq"
-                )
-                st.download_button(
-                    "📥 TestをCSVで保存",
-                    data=st.session_state.test_df.to_csv(index=False).encode("utf-8"),
-                    file_name="test_processed.csv",
-                    mime="text/csv",
-                    key="dl_te_csv"
-                )
-            else:
-                st.info("コンペ用モードでTestデータを読み込むと、ここから出力できます。")
+        render_custom_save_ui("tab6")
 
     st.divider()
     st.subheader("🏆 コンペ提出ファイル (Submit) の作成・出力")
