@@ -8,15 +8,13 @@ from sklearn.metrics import root_mean_squared_error, roc_auc_score
 
 st.set_page_config(page_title="Data Analysis & Competition App", layout="wide")
 
-# --- メモリ軽量化関数（修正版） ---
+# --- メモリ軽量化関数 ---
 def reduce_mem_usage(df):
     start_mem = df.memory_usage().sum() / 1024**2
     for col in df.columns:
-        # すべて欠損値の列・bool型はスキップ
         if df[col].isnull().all() or pd.api.types.is_bool_dtype(df[col]):
             continue
 
-        # 整数型 (int) のみダウンキャスト
         if pd.api.types.is_integer_dtype(df[col]):
             c_min, c_max = df[col].min(), df[col].max()
             if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
@@ -26,13 +24,11 @@ def reduce_mem_usage(df):
             elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
                 df[col] = df[col].astype(np.int32)
 
-        # 浮動小数点型 (float) のみダウンキャスト
         elif pd.api.types.is_float_dtype(df[col]):
             c_min, c_max = df[col].min(), df[col].max()
             if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
                 df[col] = df[col].astype(np.float32)
 
-        # 文字列型 (object / string) はユニーク数が少なければcategory化
         elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
             if df[col].nunique() / len(df) < 0.5:
                 df[col] = df[col].astype("category")
@@ -53,17 +49,15 @@ st.sidebar.title("⚙️ アプリ設定")
 mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
 st.title(f"📊 データ分析・MLアプリ（{mode}）")
 
-# セッション状態の初期化
 if "train_df" not in st.session_state:
     st.session_state.train_df = None
 if "test_df" not in st.session_state:
     st.session_state.test_df = None
 
-# --- タブ構成 ---
-tab1, tab2, tab3, tab4 = st.tabs(["1. 読み込み・軽量化", "2. グラフ可視化 (EDA)", "3. 前処理", "4. 機械学習 (LightGBM)"])
+tab1, tab2, tab3, tab4 = st.tabs(["1. 読み込み・概要", "2. グラフ可視化 (EDA)", "3. 前処理", "4. 機械学習 (LightGBM)"])
 
 # ==========================================
-# TAB 1: データ読み込み・軽量化
+# TAB 1: データ読み込み・軽量化・ユニーク確認
 # ==========================================
 with tab1:
     st.subheader("データのアップロード（CSV / Parquet対応）")
@@ -86,9 +80,23 @@ with tab1:
                 st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | メモリ: {t_start:.2f}MB → {t_end:.2f}MB")
 
     if st.session_state.train_df is not None:
-        st.dataframe(st.session_state.train_df.head(10), use_container_width=True)
-        # Parquetダウンロード（次回からの読み込み高速化用）
-        parquet_bytes = st.session_state.train_df.to_parquet(index=False)
+        df_show = st.session_state.train_df
+
+        st.write("### カラム概要（型・欠損・ユニーク数）")
+        summary_df = pd.DataFrame({
+            "型": df_show.dtypes.astype(str),
+            "ユニーク数": df_show.nunique(),
+            "ユニーク率(%)": (df_show.nunique() / len(df_show) * 100).round(2),
+            "欠損数": df_show.isnull().sum(),
+            "欠損率(%)": (df_show.isnull().mean() * 100).round(2),
+            "サンプル値（上位3件）": [", ".join(map(str, df_show[c].dropna().unique()[:3])) for c in df_show.columns]
+        })
+        st.dataframe(summary_df, use_container_width=True)
+
+        st.write("### データプレビュー（先頭10行）")
+        st.dataframe(df_show.head(10), use_container_width=True)
+
+        parquet_bytes = df_show.to_parquet(index=False)
         st.download_button("軽量化データをParquetで保存", data=parquet_bytes, file_name="train_light.parquet")
 
 # ==========================================
@@ -110,26 +118,33 @@ with tab2:
             st.plotly_chart(fig, use_container_width=True)
 
         elif chart_type == "箱ひげ図（外れ値確認）":
-            y_col = st.selectbox("数値列 (Y)", num_cols)
-            x_col = st.selectbox("カテゴリ列 (X・任意)", ["なし"] + all_cols)
-            fig = px.box(df, x=None if x_col == "なし" else x_col, y=y_col, title=f"{y_col} の箱ひげ図")
-            st.plotly_chart(fig, use_container_width=True)
+            if len(num_cols) == 0:
+                st.warning("数値列がありません。")
+            else:
+                y_col = st.selectbox("数値列 (Y)", num_cols)
+                x_col = st.selectbox("カテゴリ列 (X・任意)", ["なし"] + all_cols)
+                fig = px.box(df, x=None if x_col == "なし" else x_col, y=y_col, title=f"{y_col} の箱ひげ図")
+                st.plotly_chart(fig, use_container_width=True)
 
         elif chart_type == "散布図（2変数の関係）":
-            c1, c2, c3 = st.columns(3)
-            x_col = c1.selectbox("X軸", num_cols, index=0)
-            y_col = c2.selectbox("Y軸", num_cols, index=min(1, len(num_cols)-1))
-            color_col = c3.selectbox("色分け（任意）", ["なし"] + all_cols)
-            # 重くならないよう5000行以上はサンプリング表示
-            plot_df = df.sample(5000, random_state=42) if len(df) > 5000 else df
-            fig = px.scatter(plot_df, x=x_col, y=y_col, color=None if color_col == "なし" else color_col, opacity=0.6)
-            st.plotly_chart(fig, use_container_width=True)
+            if len(num_cols) < 2:
+                st.warning("数値列が2つ以上必要です。")
+            else:
+                c1, c2, c3 = st.columns(3)
+                x_col = c1.selectbox("X軸", num_cols, index=0)
+                y_col = c2.selectbox("Y軸", num_cols, index=1)
+                color_col = c3.selectbox("色分け（任意）", ["なし"] + all_cols)
+                plot_df = df.sample(5000, random_state=42) if len(df) > 5000 else df
+                fig = px.scatter(plot_df, x=x_col, y=y_col, color=None if color_col == "なし" else color_col, opacity=0.6)
+                st.plotly_chart(fig, use_container_width=True)
 
         elif chart_type == "相関ヒートマップ":
             if len(num_cols) > 1:
                 corr = df[num_cols].corr()
                 fig = px.imshow(corr, text_auto=".2f", aspect="auto", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
 # TAB 3: 前処理
@@ -176,73 +191,88 @@ with tab4:
         n_splits = c3.slider("CV分割数 (K-Fold)", 3, 10, 5)
 
         if st.button("🚀 LightGBMで学習・CV実行"):
-            X = df.drop(columns=[target_col]).copy()
-            y = df[target_col].copy()
+            try:
+                # 目的変数が欠損している行は除外
+                work_df = df.dropna(subset=[target_col]).reset_index(drop=True)
+                X = work_df.drop(columns=[target_col]).copy()
+                y = work_df[target_col].copy()
 
-            # object/string型をcategory型へ変換（LightGBMネイティブ対応）
-            for col in X.select_dtypes(include=["object", "string"]).columns:
-                X[col] = X[col].astype("category")
+                # 二値分類の事前チェック
+                if "二値分類" in task_type:
+                    n_unique = y.nunique()
+                    if n_unique != 2:
+                        st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {n_unique} 個です（2個である必要があります）。回帰タスクの場合は「回帰 (RMSE)」を選んでください。")
+                        st.stop()
+                    # 文字列などの場合は自動で0/1にエンコード
+                    if not pd.api.types.is_numeric_dtype(y):
+                        y = pd.Series(pd.factorize(y)[0])
 
-            oof_preds = np.zeros(len(df))
-            importances = np.zeros(X.shape[1])
+                # object/string型をcategory型へ変換
+                for col in X.select_dtypes(include=["object", "string"]).columns:
+                    X[col] = X[col].astype("category")
 
-            if mode == "コンペ用モード" and st.session_state.test_df is not None:
-                X_test = st.session_state.test_df[X.columns].copy()
-                for col in X_test.select_dtypes(include=["object", "string"]).columns:
-                    X_test[col] = X_test[col].astype("category")
-                test_preds = np.zeros(len(X_test))
-            else:
-                X_test, test_preds = None, None
+                oof_preds = np.zeros(len(work_df))
+                importances = np.zeros(X.shape[1])
 
-            kf = KFold(n_splits=n_splits, shuffle=True, random_state=42) if "回帰" in task_type else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-
-            progress = st.progress(0)
-            for fold, (tr_idx, va_idx) in enumerate(kf.split(X, y)):
-                X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
-                X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
-
-                if "回帰" in task_type:
-                    model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                if mode == "コンペ用モード" and st.session_state.test_df is not None:
+                    X_test = st.session_state.test_df[X.columns].copy()
+                    for col in X_test.select_dtypes(include=["object", "string"]).columns:
+                        X_test[col] = X_test[col].astype("category")
+                    test_preds = np.zeros(len(X_test))
                 else:
-                    model = lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                    X_test, test_preds = None, None
 
-                model.fit(
-                    X_tr, y_tr,
-                    eval_set=[(X_va, y_va)],
-                    callbacks=[lgb.early_stopping(50, verbose=False)]
-                )
+                kf = KFold(n_splits=n_splits, shuffle=True, random_state=42) if "回帰" in task_type else StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
+                progress = st.progress(0)
+                for fold, (tr_idx, va_idx) in enumerate(kf.split(X, y)):
+                    X_tr, y_tr = X.iloc[tr_idx], y.iloc[tr_idx]
+                    X_va, y_va = X.iloc[va_idx], y.iloc[va_idx]
+
+                    if "回帰" in task_type:
+                        model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+                    else:
+                        model = lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
+
+                    model.fit(
+                        X_tr, y_tr,
+                        eval_set=[(X_va, y_va)],
+                        callbacks=[lgb.early_stopping(50, verbose=False)]
+                    )
+
+                    if "回帰" in task_type:
+                        oof_preds[va_idx] = model.predict(X_va)
+                        if X_test is not None:
+                            test_preds += model.predict(X_test) / n_splits
+                    else:
+                        oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
+                        if X_test is not None:
+                            test_preds += model.predict_proba(X_test)[:, 1] / n_splits
+
+                    importances += model.feature_importances_ / n_splits
+                    progress.progress((fold + 1) / n_splits)
+
+                # スコア表示
                 if "回帰" in task_type:
-                    oof_preds[va_idx] = model.predict(X_va)
-                    if X_test is not None:
-                        test_preds += model.predict(X_test) / n_splits
+                    score = root_mean_squared_error(y, oof_preds)
+                    st.metric("OOF RMSE（低いほど良い）", f"{score:.5f}")
                 else:
-                    oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
-                    if X_test is not None:
-                        test_preds += model.predict_proba(X_test)[:, 1] / n_splits
+                    score = roc_auc_score(y, oof_preds)
+                    st.metric("OOF ROC-AUC（高いほど良い）", f"{score:.5f}")
 
-                importances += model.feature_importances_ / n_splits
-                progress.progress((fold + 1) / n_splits)
+                # 特徴量重要度グラフ
+                imp_df = pd.DataFrame({"特徴量": X.columns, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
+                fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title="特徴量重要度 (Top 20)")
+                st.plotly_chart(fig_imp, use_container_width=True)
 
-            # スコア表示
-            if "回帰" in task_type:
-                score = root_mean_squared_error(y, oof_preds)
-                st.metric("OOF RMSE（低いほど良い）", f"{score:.5f}")
-            else:
-                score = roc_auc_score(y, oof_preds)
-                st.metric("OOF ROC-AUC（高いほど良い）", f"{score:.5f}")
-
-            # 特徴量重要度グラフ
-            imp_df = pd.DataFrame({"特徴量": X.columns, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
-            fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title="特徴量重要度 (Top 20)")
-            st.plotly_chart(fig_imp, use_container_width=True)
-
-            # コンペ用：提出ファイル出力
-            if test_preds is not None:
-                sub_df = pd.DataFrame({"prediction": test_preds})
-                st.download_button(
-                    "📥 予測結果 (submission.csv) をダウンロード",
-                    data=sub_df.to_csv(index=False).encode("utf-8"),
-                    file_name="submission.csv",
-                    mime="text/csv"
-                )
+                # コンペ用：提出ファイル出力
+                if test_preds is not None:
+                    sub_df = pd.DataFrame({"prediction": test_preds})
+                    st.download_button(
+                        "📥 予測結果 (submission.csv) をダウンロード",
+                        data=sub_df.to_csv(index=False).encode("utf-8"),
+                        file_name="submission.csv",
+                        mime="text/csv"
+                    )
+            except Exception as e:
+                st.error(f"学習中にエラーが発生しました: {e}")
