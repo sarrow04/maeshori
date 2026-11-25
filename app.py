@@ -1,10 +1,18 @@
 import os
+import io
+import zipfile
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import lightgbm as lgb
-from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
+from sklearn.model_selection import (
+    KFold,
+    StratifiedKFold,
+    GroupKFold,
+    TimeSeriesSplit,
+    train_test_split
+)
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.linear_model import Ridge, LogisticRegression
@@ -138,19 +146,57 @@ def reduce_mem_usage(df):
     end_mem = df.memory_usage().sum() / 1024**2
     return df, start_mem, end_mem
 
+# --- CSV / Parquet / ZIP 共通読み込み関数 ---
+def read_uploaded_dataframe(uploaded_file, has_header=True):
+    fname = uploaded_file.name.lower()
+    if fname.endswith(".zip"):
+        with zipfile.ZipFile(uploaded_file) as z:
+            targets = [
+                f for f in z.namelist()
+                if not f.startswith("__MACOSX") and not f.endswith("/")
+                and (f.lower().endswith(".parquet") or f.lower().endswith(".csv"))
+            ]
+            if not targets:
+                raise ValueError("ZIP内にCSVまたはParquetファイルが見つかりませんでした。")
+            inner_name = targets[0]
+            with z.open(inner_name) as f:
+                data_bytes = io.BytesIO(f.read())
+                if inner_name.lower().endswith(".parquet"):
+                    return pd.read_parquet(data_bytes)
+                return pd.read_csv(data_bytes, header=0 if has_header else None)
+    elif fname.endswith(".parquet"):
+        return pd.read_parquet(uploaded_file)
+    else:
+        return pd.read_csv(uploaded_file, header=0 if has_header else None)
+
 @st.cache_data
 def load_file(uploaded_file):
-    if uploaded_file.name.endswith(".parquet"):
-        df = pd.read_parquet(uploaded_file)
-    else:
-        df = pd.read_csv(uploaded_file)
+    df = read_uploaded_dataframe(uploaded_file, has_header=True)
     return reduce_mem_usage(df)
 
 @st.cache_data
 def load_sub_file(uploaded_file, has_header):
-    if uploaded_file.name.endswith(".parquet"):
-        return pd.read_parquet(uploaded_file)
-    return pd.read_csv(uploaded_file, header=0 if has_header else None)
+    return read_uploaded_dataframe(uploaded_file, has_header=has_header)
+
+# --- 行番号文字列（例: "0, 5, 10-15"）のパース関数 ---
+def parse_row_indices(text, max_len):
+    indices = set()
+    for part in text.replace("、", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            bounds = part.split("-")
+            if len(bounds) == 2 and bounds[0].strip().isdigit() and bounds[1].strip().isdigit():
+                start_i, end_i = int(bounds[0].strip()), int(bounds[1].strip())
+                for idx in range(min(start_i, end_i), max(start_i, end_i) + 1):
+                    if 0 <= idx < max_len:
+                        indices.add(idx)
+        elif part.isdigit():
+            idx = int(part)
+            if 0 <= idx < max_len:
+                indices.add(idx)
+    return sorted(indices)
 
 # --- JIS標準地域メッシュ変換関数 ---
 def decode_mesh_code(code):
@@ -314,7 +360,7 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # TAB 1: データ読み込み・軽量化・ユニーク確認
 # ==========================================
 with tab1:
-    st.subheader("データのアップロード（CSV / Parquet対応）")
+    st.subheader("データのアップロード（CSV / Parquet / ZIP対応）")
 
     if mode == "コンペ用モード":
         col1, col2, col3 = st.columns(3)
@@ -323,33 +369,42 @@ with tab1:
         col2, col3 = None, None
 
     with col1:
-        train_file = st.file_uploader("学習用 / 分析用データ (train)", type=["csv", "parquet"])
+        train_file = st.file_uploader("学習用 / 分析用データ (train)", type=["csv", "parquet", "zip"])
         if train_file:
-            df, start_m, end_m = load_file(train_file)
-            if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
-                st.session_state.train_df = df.copy()
-                notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
-            st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+            try:
+                df, start_m, end_m = load_file(train_file)
+                if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
+                    st.session_state.train_df = df.copy()
+                    notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+                st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+            except Exception as e:
+                st.error(f"Train読み込みエラー: {e}")
 
     if mode == "コンペ用モード":
         with col2:
-            test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet"])
+            test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet", "zip"])
             if test_file:
-                t_df, t_start, t_end = load_file(test_file)
-                if st.session_state.test_df is None or st.button("testを初期状態にリセット"):
-                    st.session_state.test_df = t_df.copy()
-                    st.session_state.test_raw_df = t_df.copy()
-                    notify_and_refresh(f"Test読み込み完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
-                st.caption(f"読込済み: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+                try:
+                    t_df, t_start, t_end = load_file(test_file)
+                    if st.session_state.test_df is None or st.button("testを初期状態にリセット"):
+                        st.session_state.test_df = t_df.copy()
+                        st.session_state.test_raw_df = t_df.copy()
+                        notify_and_refresh(f"Test読み込み完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+                    st.caption(f"読込済み: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+                except Exception as e:
+                    st.error(f"Test読み込みエラー: {e}")
 
         with col3:
             sub_has_header = st.checkbox("Submitにヘッダー（列名）あり", value=True, help="SIGNATEなどヘッダーなしの提出ファイルはオフにしてください")
-            sub_file = st.file_uploader("提出用テンプレート (sample_submit)", type=["csv", "parquet"])
+            sub_file = st.file_uploader("提出用テンプレート (sample_submit)", type=["csv", "parquet", "zip"])
             if sub_file:
-                s_df = load_sub_file(sub_file, sub_has_header)
-                st.session_state.sub_template_df = s_df.copy()
-                st.session_state.sub_has_header = sub_has_header
-                st.success(f"Submit読込完了: {s_df.shape[0]:,}行 × {s_df.shape[1]}列")
+                try:
+                    s_df = load_sub_file(sub_file, sub_has_header)
+                    st.session_state.sub_template_df = s_df.copy()
+                    st.session_state.sub_has_header = sub_has_header
+                    st.success(f"Submit読込完了: {s_df.shape[0]:,}行 × {s_df.shape[1]}列")
+                except Exception as e:
+                    st.error(f"Submit読み込みエラー: {e}")
 
     if st.session_state.train_df is not None:
         df_show = st.session_state.train_df
@@ -360,7 +415,6 @@ with tab1:
             st.write("### 🔍 【コンペ用】文字列カラムのTrain / Test 非共通ユニーク値")
             te_show = st.session_state.test_df
 
-            # 文字列・カテゴリ型の共通カラムだけを抽出
             str_common_cols = [
                 c for c in df_show.columns
                 if c in te_show.columns and (
@@ -393,7 +447,6 @@ with tab1:
                 st.warning(f"文字列カラムのうち **{len(diff_summary_df)}列** で、TrainとTestに共通していない値が見つかりました。")
                 st.dataframe(diff_summary_df, use_container_width=True)
 
-                # 個別カラムの非共通値を全件表示＆CSV出力
                 sel_diff_col = st.selectbox("非共通の値をすべて見るカラムを選択", list(diff_details.keys()), key="sel_diff_col")
                 if sel_diff_col:
                     tr_only, te_only = diff_details[sel_diff_col]
@@ -515,7 +568,7 @@ with tab2:
                 st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
-# TAB 3: 前処理（基本・日付分解・文字列抽出・条件抽出）
+# TAB 3: 前処理（基本・日付分解・文字列抽出・条件抽出・特定行削除）
 # ==========================================
 with tab3:
     if st.session_state.train_df is None:
@@ -528,9 +581,10 @@ with tab3:
             "前処理メニュー",
             [
                 "1. 列削除・欠損補完",
-                "2. 日付・時刻の分解（年月・曜日など）",
+                "2. 日付・時刻の分解",
                 "3. 文字列の抜き取り・加工",
-                "4. 条件で抽出・出力（フィルタリング）"
+                "4. 条件で抽出・出力",
+                "5. 特定行の削除"
             ],
             horizontal=True
         )
@@ -559,7 +613,7 @@ with tab3:
                             st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
                 notify_and_refresh("基本前処理を適用しました！（リアルタイム確認も更新済み）")
 
-        elif prep_mode == "2. 日付・時刻の分解（年月・曜日など）":
+        elif prep_mode == "2. 日付・時刻の分解":
             st.write("### 日付列を年・月・日・曜日などに分解")
             dt_col = st.selectbox("日付・時刻の列を選択", all_cols, key="dt_col")
             dt_parts = st.multiselect(
@@ -667,7 +721,7 @@ with tab3:
                 except Exception as e:
                     st.error(f"処理中にエラーが発生しました: {e}")
 
-        elif prep_mode == "4. 条件で抽出・出力（フィルタリング）":
+        elif prep_mode == "4. 条件で抽出・出力":
             st.write("### 条件を指定して該当する行だけを抽出・出力")
             target_options = ["Trainデータ"] + (["Testデータ"] if st.session_state.test_df is not None else [])
             fc1, fc2, fc3 = st.columns(3)
@@ -754,6 +808,112 @@ with tab3:
                 else:
                     st.session_state.test_df = filtered_df.reset_index(drop=True)
                 notify_and_refresh(f"{flt_target}を抽出結果（{len(filtered_df):,}行）で上書きしました！")
+
+        elif prep_mode == "5. 特定行の削除":
+            st.write("### 特定の行を削除する")
+            del_target_opts = ["Trainデータ"] + (["Testデータ（注意：提出行数が変わります）"] if st.session_state.test_df is not None else [])
+            dc1, dc2 = st.columns(2)
+            del_target = dc1.selectbox("対象データ", del_target_opts, key="del_row_target")
+            del_method = dc2.selectbox(
+                "削除方法",
+                [
+                    "A. 行番号（インデックス）を指定して削除",
+                    "B. 条件に一致する行を削除（外れ値・ノイズ除去）",
+                    "C. 重複行を削除",
+                    "D. 指定した列が欠損 (NaN) の行を削除"
+                ]
+            )
+
+            is_train_del = del_target.startswith("Train")
+            target_df = st.session_state.train_df if is_train_del else st.session_state.test_df
+            t_cols = target_df.columns.tolist()
+
+            if del_method.startswith("A."):
+                idx_text = st.text_input("削除したい行番号を入力（カンマ区切り・ハイフン範囲指定可 例: 0, 3, 10-15）", value="")
+                del_indices = parse_row_indices(idx_text, len(target_df))
+                if del_indices:
+                    st.caption(f"削除対象: **{len(del_indices):,}行**（プレビュー先頭10件）")
+                    st.dataframe(target_df.iloc[del_indices[:10]], use_container_width=True)
+                if st.button("🗑️ 指定した行番号を削除する"):
+                    if not del_indices:
+                        st.warning("有効な行番号を入力してください。")
+                    else:
+                        new_df = target_df.drop(index=target_df.index[del_indices]).reset_index(drop=True)
+                        if is_train_del:
+                            st.session_state.train_df = new_df
+                        else:
+                            st.session_state.test_df = new_df
+                        notify_and_refresh(f"{len(del_indices):,}行を削除しました（残り {len(new_df):,}行）")
+
+            elif del_method.startswith("B."):
+                cc1, cc2, cc3 = st.columns(3)
+                d_col = cc1.selectbox("カラム", t_cols, key="del_cond_col")
+                is_num = pd.api.types.is_numeric_dtype(target_df[d_col])
+                ops = ["以上 (>=)", "より大きい (>)", "以下 (<=)", "未満 (<)", "等しい (==)"] if is_num else ["を含む", "完全一致 (==)"]
+                d_op = cc2.selectbox("削除する条件", ops, key="del_cond_op")
+
+                if is_num:
+                    d_val = cc3.number_input("値（数値）", value=0.0, format="%g", key="del_cond_num")
+                    if d_op == "以上 (>=)":
+                        del_mask = target_df[d_col] >= d_val
+                    elif d_op == "より大きい (>)":
+                        del_mask = target_df[d_col] > d_val
+                    elif d_op == "以下 (<=)":
+                        del_mask = target_df[d_col] <= d_val
+                    elif d_op == "未満 (<)":
+                        del_mask = target_df[d_col] < d_val
+                    else:
+                        del_mask = target_df[d_col] == d_val
+                else:
+                    d_val = cc3.text_input("値（文字列）", value="", key="del_cond_str")
+                    s_str = target_df[d_col].astype(str)
+                    del_mask = s_str.str.contains(d_val, na=False, regex=False) if d_op == "を含む" else (s_str == d_val)
+
+                del_mask = del_mask.fillna(False)
+                del_cnt = int(del_mask.sum())
+                st.caption(f"削除対象の行数: **{del_cnt:,}行** / {len(target_df):,}行")
+                if st.button("🗑️ 条件に一致する行を削除する"):
+                    if del_cnt == 0:
+                        st.warning("削除対象の行がありません。")
+                    else:
+                        new_df = target_df[~del_mask].reset_index(drop=True)
+                        if is_train_del:
+                            st.session_state.train_df = new_df
+                        else:
+                            st.session_state.test_df = new_df
+                        notify_and_refresh(f"条件一致の {del_cnt:,}行を削除しました（残り {len(new_df):,}行）")
+
+            elif del_method.startswith("C."):
+                dup_cols = st.multiselect("重複判定に使う列（空欄なら全列一致で判定）", t_cols, key="del_dup_cols")
+                subset_arg = dup_cols if dup_cols else None
+                dup_cnt = int(target_df.duplicated(subset=subset_arg).sum())
+                st.caption(f"重複している行数: **{dup_cnt:,}行**")
+                if st.button("🗑️ 重複行を削除する"):
+                    if dup_cnt == 0:
+                        st.warning("重複行はありません。")
+                    else:
+                        new_df = target_df.drop_duplicates(subset=subset_arg).reset_index(drop=True)
+                        if is_train_del:
+                            st.session_state.train_df = new_df
+                        else:
+                            st.session_state.test_df = new_df
+                        notify_and_refresh(f"重複行 {dup_cnt:,}行を削除しました（残り {len(new_df):,}行）")
+
+            elif del_method.startswith("D."):
+                na_cols = st.multiselect("欠損チェック対象の列（空欄ならいずれかの列が欠損の行）", t_cols, key="del_na_cols")
+                subset_arg = na_cols if na_cols else None
+                na_cnt = int(target_df.isnull().any(axis=1).sum()) if subset_arg is None else int(target_df[subset_arg].isnull().any(axis=1).sum())
+                st.caption(f"削除対象の欠損行数: **{na_cnt:,}行**")
+                if st.button("🗑️ 欠損を含む行を削除する"):
+                    if na_cnt == 0:
+                        st.warning("対象の欠損行はありません。")
+                    else:
+                        new_df = target_df.dropna(subset=subset_arg).reset_index(drop=True)
+                        if is_train_del:
+                            st.session_state.train_df = new_df
+                        else:
+                            st.session_state.test_df = new_df
+                        notify_and_refresh(f"欠損行 {na_cnt:,}行を削除しました（残り {len(new_df):,}行）")
 
         render_custom_save_ui("tab3")
 
@@ -989,7 +1149,7 @@ with tab4:
                         notify_and_refresh(f"メッシュコード列「{new_m_col}」を生成しました！")
 
             elif mesh_mode.startswith("C."):
-                ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet)", type=["csv", "parquet"], key="ext_mesh_file")
+                ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet / ZIP)", type=["csv", "parquet", "zip"], key="ext_mesh_file")
                 if ext_file:
                     ext_df, _, _ = load_file(ext_file)
                     st.caption(f"外部データ: {ext_df.shape[0]:,}行 × {ext_df.shape[1]}列")
@@ -1026,7 +1186,7 @@ with tab4:
         render_custom_save_ui("tab4")
 
 # ==========================================
-# TAB 5: 機械学習・評価（チューニングプリセット対応）
+# TAB 5: 機械学習・評価（分割方法指定・チューニング対応）
 # ==========================================
 with tab5:
     if st.session_state.train_df is None:
@@ -1058,8 +1218,23 @@ with tab5:
         feature_cols = st.multiselect("学習に使う特徴量カラムを選択", default_features, default=default_features)
 
         c4, c5, c6 = st.columns(3)
-        cv_type = c4.selectbox("CV（分割）方法", ["K-Fold / Stratified K-Fold（通常）", "TimeSeriesSplit（時系列分析用）"])
-        n_splits = c5.slider("CV分割数", 3, 10, 5)
+        cv_type = c4.selectbox(
+            "データ分割方法",
+            [
+                "KFold（ランダム分割）",
+                "StratifiedKFold（層化抽出・分類向け）",
+                "GroupKFold（グループ単位で分割）",
+                "TimeSeriesSplit（時系列分割）",
+                "Hold-out（単一分割・高速テスト）"
+            ]
+        )
+
+        if "Hold-out" in cv_type:
+            val_ratio = c5.slider("検証データの割合", 0.1, 0.5, 0.2, 0.05)
+            n_splits = 1
+        else:
+            n_splits = c5.slider("CV分割数", 2, 10, 5)
+            val_ratio = 0.2
 
         if task_type == "回帰":
             use_log1p = c6.checkbox("目的変数を log1p 変換（RMSLE最適化）", value=False)
@@ -1068,8 +1243,11 @@ with tab5:
             c6.write("")
 
         ts_cv_sort_col = None
+        group_cv_col = None
         if "TimeSeriesSplit" in cv_type:
-            ts_cv_sort_col = st.selectbox("時系列CV用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
+            ts_cv_sort_col = st.selectbox("時系列分割用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
+        elif "GroupKFold" in cv_type:
+            group_cv_col = st.selectbox("グループ分割のキー列（ID・メッシュ・店舗など）", all_cols)
 
         if st.button("🚀 学習・CV評価を実行"):
             if not feature_cols:
@@ -1123,15 +1301,33 @@ with tab5:
                         if X_test is not None:
                             X_test[col] = X_test[col].fillna(med)
 
-                if "TimeSeriesSplit" in cv_type:
+                # --- 分割インデックスの作成 ---
+                if "Hold-out" in cv_type:
+                    strat_arg = y if task_type == "二値分類" else None
+                    tr_idx, va_idx = train_test_split(np.arange(len(work_df)), test_size=val_ratio, random_state=42, stratify=strat_arg)
+                    splits = [(tr_idx, va_idx)]
+                elif "TimeSeriesSplit" in cv_type:
                     splitter = TimeSeriesSplit(n_splits=n_splits)
                     splits = list(splitter.split(X))
-                elif task_type == "回帰":
+                elif "GroupKFold" in cv_type:
+                    groups = work_df[group_cv_col].astype(str).fillna("NaN")
+                    if groups.nunique() < n_splits:
+                        st.error(f"グループ列 '{group_cv_col}' のユニーク数（{groups.nunique()}）がCV分割数（{n_splits}）より少ないため分割できません。")
+                        st.stop()
+                    splitter = GroupKFold(n_splits=n_splits)
+                    splits = list(splitter.split(X, y, groups=groups))
+                elif "StratifiedKFold" in cv_type:
+                    if task_type == "回帰":
+                        # 回帰でStratifiedが選ばれた場合はビニングして層化分割
+                        y_bins = pd.qcut(y, q=min(10, y.nunique()), labels=False, duplicates="drop")
+                        splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                        splits = list(splitter.split(X, y_bins))
+                    else:
+                        splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                        splits = list(splitter.split(X, y))
+                else:
                     splitter = KFold(n_splits=n_splits, shuffle=True, random_state=42)
                     splits = list(splitter.split(X))
-                else:
-                    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-                    splits = list(splitter.split(X, y))
 
                 presets_to_run = (
                     ["浅い（過学習防止）", "標準（バランス）", "深い（表現力重視）"]
@@ -1227,7 +1423,7 @@ with tab5:
                     st.session_state.last_model_name = f"{model_name.split()[0]}_{best_res['設定'].split('（')[0]}"
                     st.session_state.last_task_type = task_type
 
-                st.write(f"### 📈 評価スコア (OOF: {best_res['設定']})")
+                st.write(f"### 📈 評価スコア (OOF: {best_res['設定']} / {cv_type.split('（')[0]})")
                 if task_type == "回帰":
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("RMSE（低いほど良い）", f"{best_res['RMSE']:.5f}")
