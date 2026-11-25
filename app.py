@@ -38,6 +38,11 @@ def save_backup():
     except Exception:
         pass
 
+def notify_and_refresh(msg):
+    save_backup()
+    st.session_state.flash_msg = msg
+    st.rerun()
+
 def render_custom_save_ui(key_prefix):
     st.divider()
     st.write("### 💾 現在のデータを名前を付けて保存")
@@ -75,6 +80,35 @@ def render_custom_save_ui(key_prefix):
                 file_name=f"{te_name}.parquet",
                 key=f"{key_prefix}_te_pq"
             )
+
+# --- リアルタイム確認パネル（先頭10行 & 基本統計量） ---
+def render_live_preview():
+    if st.session_state.train_df is None:
+        return
+    tr_shape = st.session_state.train_df.shape
+    label = f"⚡ リアルタイム確認：基本統計量 & 10行プレビュー（現在 Train: {tr_shape[0]:,}行 × {tr_shape[1]}列）"
+    with st.expander(label, expanded=False):
+        c1, c2 = st.columns(2)
+        target_opts = ["Trainデータ"] + (["Testデータ"] if st.session_state.test_df is not None else [])
+        view_target = c1.radio("表示するデータ", target_opts, horizontal=True, key="live_view_target")
+        view_pos = c2.radio("表示位置（10行）", ["先頭10行", "末尾10行"], horizontal=True, key="live_view_pos")
+
+        target_df = st.session_state.train_df if view_target == "Trainデータ" else st.session_state.test_df
+        mem_mb = target_df.memory_usage().sum() / 1024**2
+        st.caption(f"サイズ: {target_df.shape[0]:,}行 × {target_df.shape[1]}列 | メモリ: {mem_mb:.2f}MB | 総欠損数: {target_df.isnull().sum().sum():,}")
+
+        st.write("**📄 データプレビュー（10行）**")
+        preview_df = target_df.head(10) if view_pos == "先頭10行" else target_df.tail(10)
+        st.dataframe(preview_df, use_container_width=True)
+
+        st.write("**📊 基本統計量（数値列）**")
+        num_df = target_df.select_dtypes(include=[np.number])
+        if num_df.shape[1] > 0:
+            desc_df = num_df.describe().T
+            desc_df.columns = ["件数", "平均", "標準偏差", "最小", "25%", "中央値(50%)", "75%", "最大"]
+            st.dataframe(desc_df.round(3), use_container_width=True)
+        else:
+            st.info("数値列がありません。")
 
 # --- メモリ軽量化関数 ---
 def reduce_mem_usage(df):
@@ -234,7 +268,8 @@ for key, default_val in [
     ("sub_has_header", True),
     ("test_preds", None),
     ("last_model_name", ""),
-    ("last_task_type", "")
+    ("last_task_type", ""),
+    ("flash_msg", "")
 ]:
     if key not in st.session_state:
         st.session_state[key] = default_val
@@ -251,11 +286,20 @@ if os.path.exists(TRAIN_CACHE_PATH):
         if os.path.exists(TEST_CACHE_PATH):
             st.session_state.test_df = pd.read_parquet(TEST_CACHE_PATH)
             st.session_state.test_raw_df = st.session_state.test_df.copy()
-        st.sidebar.success("前回のデータを復元しました！")
+        st.session_state.flash_msg = "前回の作業データを復元しました！"
+        st.rerun()
 else:
     st.sidebar.caption("データを読み込み・加工すると自動でバックアップされます。")
 
 st.title(f"📊 データ分析・MLアプリ（{mode}）")
+
+# 処理完了メッセージの表示
+if st.session_state.flash_msg:
+    st.success(st.session_state.flash_msg)
+    st.session_state.flash_msg = ""
+
+# 全タブ共通のリアルタイム確認パネル
+render_live_preview()
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "1. 読み込み・概要",
@@ -284,8 +328,8 @@ with tab1:
             df, start_m, end_m = load_file(train_file)
             if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
                 st.session_state.train_df = df.copy()
-                save_backup()
-            st.success(f"Train完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+                notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
+            st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
 
     if mode == "コンペ用モード":
         with col2:
@@ -295,8 +339,8 @@ with tab1:
                 if st.session_state.test_df is None or st.button("testを初期状態にリセット"):
                     st.session_state.test_df = t_df.copy()
                     st.session_state.test_raw_df = t_df.copy()
-                    save_backup()
-                st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+                    notify_and_refresh(f"Test読み込み完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+                st.caption(f"読込済み: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
 
         with col3:
             sub_has_header = st.checkbox("Submitにヘッダー（列名）あり", value=True, help="SIGNATEなどヘッダーなしの提出ファイルはオフにしてください")
@@ -334,9 +378,6 @@ with tab1:
             vc_df["割合(%)"] = (vc_df["出現数"] / len(df_show) * 100).round(2)
             st.caption(f"「{selected_col}」の全ユニーク値: {len(vc_df):,}種類（出現数が多い順）")
             st.dataframe(vc_df, use_container_width=True)
-
-        st.write("### データプレビュー（先頭10行）")
-        st.dataframe(df_show.head(10), use_container_width=True)
 
 # ==========================================
 # TAB 2: グラフ可視化 (Plotly)
@@ -446,8 +487,7 @@ with tab3:
                         st.session_state.train_df[c] = st.session_state.train_df[c].fillna(val)
                         if st.session_state.test_df is not None and c in st.session_state.test_df.columns:
                             st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
-                save_backup()
-                st.success("基本前処理を適用し、自動バックアップしました！")
+                notify_and_refresh("基本前処理を適用しました！（リアルタイム確認も更新済み）")
 
         elif prep_mode == "2. 日付・時刻の分解（年月・曜日など）":
             st.write("### 日付列を年・月・日・曜日などに分解")
@@ -486,8 +526,7 @@ with tab3:
                     st.session_state.train_df = apply_dt(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_dt(st.session_state.test_df)
-                    save_backup()
-                    st.success(f"「{dt_col}」を分解し、自動バックアップしました！")
+                    notify_and_refresh(f"「{dt_col}」を分解しました！（リアルタイム確認も更新済み）")
 
         elif prep_mode == "3. 文字列の抜き取り・加工":
             st.write("### 特定の文字列を抜き取る・フラグ化する")
@@ -554,9 +593,7 @@ with tab3:
                     st.session_state.train_df = apply_str(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_str(st.session_state.test_df)
-                    save_backup()
-                    st.success(f"新しい列「{new_str_col}」を作成し、自動バックアップしました！")
-                    st.dataframe(st.session_state.train_df[[str_col, new_str_col]].head(5), use_container_width=True)
+                    notify_and_refresh(f"新しい列「{new_str_col}」を作成しました！（リアルタイム確認も更新済み）")
                 except Exception as e:
                     st.error(f"処理中にエラーが発生しました: {e}")
 
@@ -616,7 +653,6 @@ with tab3:
 
                 masks.append(m.fillna(False))
 
-            # 条件の結合
             final_mask = masks[0]
             for m in masks[1:]:
                 final_mask = (final_mask & m) if "AND" in logic_op else (final_mask | m)
@@ -626,7 +662,6 @@ with tab3:
             st.success(f"抽出結果: **{len(filtered_df):,}行** / {len(src_df):,}行（{ratio:.2f}%）")
             st.dataframe(filtered_df.head(50), use_container_width=True)
 
-            # 抽出データだけの保存＆上書き
             st.write("#### 抽出したデータの保存・反映")
             out_name = st.text_input("抽出データのファイル名（拡張子不要）", value="filtered_data", key="flt_out_name")
             fb1, fb2, fb3 = st.columns(3)
@@ -648,10 +683,8 @@ with tab3:
                     st.session_state.train_df = filtered_df.reset_index(drop=True)
                 else:
                     st.session_state.test_df = filtered_df.reset_index(drop=True)
-                save_backup()
-                st.success(f"{flt_target}を抽出結果（{len(filtered_df):,}行）で上書きしました！")
+                notify_and_refresh(f"{flt_target}を抽出結果（{len(filtered_df):,}行）で上書きしました！")
 
-        # 名前を付けて保存エリア
         render_custom_save_ui("tab3")
 
 # ==========================================
@@ -704,8 +737,7 @@ with tab4:
                     st.session_state.train_df = apply_op(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_op(st.session_state.test_df)
-                    save_backup()
-                    st.success(f"特徴量「{new_col_name}」を追加しました！")
+                    notify_and_refresh(f"特徴量「{new_col_name}」を追加しました！")
 
         elif fe_type == "2. GroupBy集約（カテゴリ別集計）":
             if len(num_cols) == 0:
@@ -738,8 +770,7 @@ with tab4:
                                 new_name = f"{grp_col}_{val_col}_{func}"
                                 tr[new_name] = tr.groupby(grp_col, observed=False)[val_col].transform(func).astype(np.float32)
                             st.session_state.train_df = tr
-                        save_backup()
-                        st.success(f"GroupBy特徴量（{len(agg_funcs)}列）を追加しました！")
+                        notify_and_refresh(f"GroupBy特徴量（{len(agg_funcs)}列）を追加しました！")
 
         elif fe_type == "3. 時系列（ラグ・差分・移動平均）":
             if len(num_cols) == 0:
@@ -821,8 +852,7 @@ with tab4:
                     else:
                         st.session_state.train_df = work.sort_values("_orig_idx").drop(columns=["_orig_idx"]).reset_index(drop=True)
 
-                    save_backup()
-                    st.success(f"時系列特徴量を {len(created_cols)} 列追加しました！: {', '.join(created_cols)}")
+                    notify_and_refresh(f"時系列特徴量を {len(created_cols)} 列追加しました！")
 
         elif fe_type == "4. 地域メッシュ（国土交通）":
             mesh_mode = st.selectbox(
@@ -863,8 +893,7 @@ with tab4:
                     st.session_state.train_df = apply_mesh_dec(st.session_state.train_df)
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_mesh_dec(st.session_state.test_df)
-                    save_backup()
-                    st.success(f"「{mesh_col}」のメッシュ分解・変換を完了しました！")
+                    notify_and_refresh(f"「{mesh_col}」のメッシュ分解・変換を完了しました！")
 
             elif mesh_mode.startswith("B."):
                 if len(num_cols) < 2:
@@ -887,8 +916,7 @@ with tab4:
                         st.session_state.train_df = apply_mesh_enc(st.session_state.train_df)
                         if st.session_state.test_df is not None:
                             st.session_state.test_df = apply_mesh_enc(st.session_state.test_df)
-                        save_backup()
-                        st.success(f"メッシュコード列「{new_m_col}」を生成しました！")
+                        notify_and_refresh(f"メッシュコード列「{new_m_col}」を生成しました！")
 
             elif mesh_mode.startswith("C."):
                 ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet)", type=["csv", "parquet"], key="ext_mesh_file")
@@ -923,10 +951,8 @@ with tab4:
                             st.session_state.train_df = apply_ext_join(st.session_state.train_df)
                             if st.session_state.test_df is not None:
                                 st.session_state.test_df = apply_ext_join(st.session_state.test_df)
-                            save_backup()
-                            st.success(f"外部データから {len(add_cols)} 列を結合しました！")
+                            notify_and_refresh(f"外部データから {len(add_cols)} 列を結合しました！")
 
-        # 名前を付けて保存エリア
         render_custom_save_ui("tab4")
 
 # ==========================================
