@@ -4,31 +4,39 @@ import numpy as np
 import plotly.express as px
 import lightgbm as lgb
 from sklearn.model_selection import KFold, StratifiedKFold
-from sklearn.metrics import root_mean_squared_error, roc_auc_score, accuracy_score
+from sklearn.metrics import root_mean_squared_error, roc_auc_score
 
 st.set_page_config(page_title="Data Analysis & Competition App", layout="wide")
 
-# --- メモリ軽量化関数 ---
+# --- メモリ軽量化関数（修正版） ---
 def reduce_mem_usage(df):
     start_mem = df.memory_usage().sum() / 1024**2
     for col in df.columns:
-        col_type = df[col].dtype
-        if col_type != object and str(col_type) != "category":
+        # すべて欠損値の列・bool型はスキップ
+        if df[col].isnull().all() or pd.api.types.is_bool_dtype(df[col]):
+            continue
+
+        # 整数型 (int) のみダウンキャスト
+        if pd.api.types.is_integer_dtype(df[col]):
             c_min, c_max = df[col].min(), df[col].max()
-            if str(col_type)[:3] == "int":
-                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
-                    df[col] = df[col].astype(np.int8)
-                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
-                    df[col] = df[col].astype(np.int16)
-                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
-                    df[col] = df[col].astype(np.int32)
-            else:
-                if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
-                    df[col] = df[col].astype(np.float32)
-        elif col_type == object:
-            # ユニーク数が少ない文字列はcategory型にして軽量化
+            if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                df[col] = df[col].astype(np.int8)
+            elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                df[col] = df[col].astype(np.int16)
+            elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                df[col] = df[col].astype(np.int32)
+
+        # 浮動小数点型 (float) のみダウンキャスト
+        elif pd.api.types.is_float_dtype(df[col]):
+            c_min, c_max = df[col].min(), df[col].max()
+            if c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                df[col] = df[col].astype(np.float32)
+
+        # 文字列型 (object / string) はユニーク数が少なければcategory化
+        elif pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
             if df[col].nunique() / len(df) < 0.5:
                 df[col] = df[col].astype("category")
+
     end_mem = df.memory_usage().sum() / 1024**2
     return df, start_mem, end_mem
 
@@ -171,8 +179,8 @@ with tab4:
             X = df.drop(columns=[target_col]).copy()
             y = df[target_col].copy()
 
-            # object型をcategory型へ変換（LightGBMネイティブ対応）
-            for col in X.select_dtypes(include=["object"]).columns:
+            # object/string型をcategory型へ変換（LightGBMネイティブ対応）
+            for col in X.select_dtypes(include=["object", "string"]).columns:
                 X[col] = X[col].astype("category")
 
             oof_preds = np.zeros(len(df))
@@ -180,7 +188,7 @@ with tab4:
 
             if mode == "コンペ用モード" and st.session_state.test_df is not None:
                 X_test = st.session_state.test_df[X.columns].copy()
-                for col in X_test.select_dtypes(include=["object"]).columns:
+                for col in X_test.select_dtypes(include=["object", "string"]).columns:
                     X_test[col] = X_test[col].astype("category")
                 test_preds = np.zeros(len(X_test))
             else:
