@@ -58,6 +58,12 @@ def load_file(uploaded_file):
         df = pd.read_csv(uploaded_file)
     return reduce_mem_usage(df)
 
+@st.cache_data
+def load_sub_file(uploaded_file, has_header):
+    if uploaded_file.name.endswith(".parquet"):
+        return pd.read_parquet(uploaded_file)
+    return pd.read_csv(uploaded_file, header=0 if has_header else None)
+
 # --- サイドバー：モード切替 ---
 st.sidebar.title("⚙️ アプリ設定")
 mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
@@ -68,6 +74,8 @@ for key, default_val in [
     ("train_df", None),
     ("test_df", None),
     ("test_raw_df", None),
+    ("sub_template_df", None),
+    ("sub_has_header", True),
     ("test_preds", None),
     ("last_model_name", ""),
     ("last_task_type", "")
@@ -89,24 +97,39 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 # ==========================================
 with tab1:
     st.subheader("データのアップロード（CSV / Parquet対応）")
-    col1, col2 = st.columns(2)
+
+    if mode == "コンペ用モード":
+        col1, col2, col3 = st.columns(3)
+    else:
+        col1 = st.container()
+        col2, col3 = None, None
+
     with col1:
         train_file = st.file_uploader("学習用 / 分析用データ (train)", type=["csv", "parquet"])
         if train_file:
             df, start_m, end_m = load_file(train_file)
-            if st.session_state.train_df is None or st.button("trainデータを初期状態にリセット"):
+            if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
                 st.session_state.train_df = df.copy()
-            st.success(f"Train完了: {df.shape[0]:,}行 × {df.shape[1]}列 | メモリ: {start_m:.2f}MB → {end_m:.2f}MB")
+            st.success(f"Train完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
 
-    with col2:
-        if mode == "コンペ用モード":
+    if mode == "コンペ用モード":
+        with col2:
             test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet"])
             if test_file:
                 t_df, t_start, t_end = load_file(test_file)
-                if st.session_state.test_df is None or st.button("testデータを初期状態にリセット"):
+                if st.session_state.test_df is None or st.button("testを初期状態にリセット"):
                     st.session_state.test_df = t_df.copy()
                     st.session_state.test_raw_df = t_df.copy()
-                st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | メモリ: {t_start:.2f}MB → {t_end:.2f}MB")
+                st.success(f"Test完了: {t_df.shape[0]:,}行 × {t_df.shape[1]}列 | {t_start:.1f}MB→{t_end:.1f}MB")
+
+        with col3:
+            sub_has_header = st.checkbox("Submitにヘッダー（列名）あり", value=True, help="SIGNATEなどヘッダーなしの提出ファイルはオフにしてください")
+            sub_file = st.file_uploader("提出用テンプレート (sample_submit)", type=["csv", "parquet"])
+            if sub_file:
+                s_df = load_sub_file(sub_file, sub_has_header)
+                st.session_state.sub_template_df = s_df.copy()
+                st.session_state.sub_has_header = sub_has_header
+                st.success(f"Submit読込完了: {s_df.shape[0]:,}行 × {s_df.shape[1]}列")
 
     if st.session_state.train_df is not None:
         df_show = st.session_state.train_df
@@ -713,7 +736,7 @@ with tab5:
                 st.plotly_chart(fig_imp, use_container_width=True)
 
                 if test_preds is not None:
-                    st.info("予測結果を保存しました！「6. 提出・データ出力 (Submit)」タブから提出ファイルを整形してダウンロードできます。")
+                    st.info("予測結果を保存しました！「6. 提出・データ出力 (Submit)」タブから提出ファイルをダウンロードできます。")
 
             except Exception as e:
                 st.error(f"学習中にエラーが発生しました: {e}")
@@ -769,16 +792,9 @@ with tab6:
         st.info("コンペ用モードでTestデータを読み込み、タブ5で学習を実行すると、ここで提出ファイルを作成できます。")
     else:
         preds = st.session_state.test_preds.copy()
-        raw_test = st.session_state.test_raw_df
-
-        c1, c2, c3 = st.columns(3)
-        id_col_options = ["なし（予測値のみ）"] + (raw_test.columns.tolist() if raw_test is not None else [])
-        id_col = c1.selectbox("ID列を選択（元Testデータから取得）", id_col_options, index=1 if len(id_col_options) > 1 else 0)
-        pred_col_name = c2.text_input("予測列の列名", value="prediction")
-        include_header = c3.checkbox("ヘッダー（列名）を出力する", value=True, help="SIGNATEなどヘッダー不要のコンペはオフにしてください")
 
         # 予測値の後処理
-        st.write("#### 予測値の後処理（任意）")
+        st.write("#### 1. 予測値の後処理（任意）")
         p1, p2, p3 = st.columns(3)
         clip_zero = p1.checkbox("0未満を0にクリップ", value=False)
         round_int = p2.checkbox("四捨五入して整数化", value=False)
@@ -792,14 +808,44 @@ with tab6:
         elif round_int:
             preds = np.rint(preds).astype(int)
 
-        # Submit用DataFrameの組み立て
-        if id_col != "なし（予測値のみ）" and raw_test is not None:
-            sub_df = pd.DataFrame({id_col: raw_test[id_col].values, pred_col_name: preds})
+        st.write("#### 2. フォーマット設定")
+        # sample_submission が読み込まれている場合
+        if st.session_state.sub_template_df is not None:
+            sub_df = st.session_state.sub_template_df.copy()
+            if len(sub_df) != len(preds):
+                st.error(f"行数が一致しません！ sample_submit: {len(sub_df):,}行 / Test予測: {len(preds):,}行")
+                st.stop()
+
+            c1, c2 = st.columns(2)
+            target_sub_col = c1.selectbox(
+                "予測値を書き込む列（通常は一番右の列）",
+                sub_df.columns.tolist(),
+                index=len(sub_df.columns) - 1
+            )
+            include_header = c2.checkbox(
+                "ヘッダー（列名）を出力する",
+                value=st.session_state.sub_has_header
+            )
+            sub_df[target_sub_col] = preds
+            st.success("読み込んだ sample_submit のフォーマットに予測値を埋め込みました。")
+
+        # sample_submission がない場合は test データから自動生成
         else:
-            sub_df = pd.DataFrame({pred_col_name: preds})
+            st.caption("※タブ1で sample_submit を読み込んでいないため、Testデータから作成します。")
+            raw_test = st.session_state.test_raw_df
+            c1, c2, c3 = st.columns(3)
+            id_col_options = ["なし（予測値のみ）"] + (raw_test.columns.tolist() if raw_test is not None else [])
+            id_col = c1.selectbox("ID列を選択（元Testデータから取得）", id_col_options, index=1 if len(id_col_options) > 1 else 0)
+            pred_col_name = c2.text_input("予測列の列名", value="prediction")
+            include_header = c3.checkbox("ヘッダー（列名）を出力する", value=True)
+
+            if id_col != "なし（予測値のみ）" and raw_test is not None:
+                sub_df = pd.DataFrame({id_col: raw_test[id_col].values, pred_col_name: preds})
+            else:
+                sub_df = pd.DataFrame({pred_col_name: preds})
 
         # 提出前チェック
-        st.write("#### 提出前チェック")
+        st.write("#### 3. 提出前チェック")
         chk1, chk2, chk3, chk4 = st.columns(4)
         chk1.metric("行数", f"{len(sub_df):,}")
         chk2.metric("欠損数", f"{sub_df.isnull().sum().sum():,}")
