@@ -354,6 +354,43 @@ with tab1:
     if st.session_state.train_df is not None:
         df_show = st.session_state.train_df
 
+        # --- コンペ用モード限定：Train / Test 共通ユニーク値なしチェック ---
+        if mode == "コンペ用モード" and st.session_state.test_df is not None:
+            st.divider()
+            st.write("### 🔍 【コンペ用】Train / Test でユニーク値に共通点がないカラム")
+            te_show = st.session_state.test_df
+            common_cols = [c for c in df_show.columns if c in te_show.columns]
+
+            no_overlap_rows = []
+            for c in common_cols:
+                tr_u = set(df_show[c].dropna().unique())
+                te_u = set(te_show[c].dropna().unique())
+                if len(tr_u & te_u) == 0:
+                    no_overlap_rows.append({
+                        "カラム名": c,
+                        "型": str(df_show[c].dtype),
+                        "Trainユニーク数": len(tr_u),
+                        "Testユニーク数": len(te_u),
+                        "共通ユニーク数": 0,
+                        "Trainサンプル（上位3件）": ", ".join(map(str, list(tr_u)[:3])),
+                        "Testサンプル（上位3件）": ", ".join(map(str, list(te_u)[:3]))
+                    })
+
+            if no_overlap_rows:
+                no_overlap_df = pd.DataFrame(no_overlap_rows)
+                st.warning(f"TrainとTestで共通のユニーク値が1つもないカラムが **{len(no_overlap_df)}列** 見つかりました（ID列や時期が完全に異なる列の可能性があります）。")
+                st.dataframe(no_overlap_df, use_container_width=True)
+                st.download_button(
+                    "📥 共通点なしカラム一覧をCSV出力",
+                    data=no_overlap_df.to_csv(index=False).encode("utf-8"),
+                    file_name="no_overlap_columns.csv",
+                    mime="text/csv",
+                    key="dl_no_overlap_csv"
+                )
+            else:
+                st.success("TrainとTestの共通カラムすべてに、1つ以上の共通ユニーク値が存在します（完全不一致のカラムはありません）。")
+
+        st.divider()
         st.write("### カラム概要（型・欠損・ユニーク数）")
         top_vals = []
         for c in df_show.columns:
