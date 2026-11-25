@@ -64,6 +64,73 @@ def load_sub_file(uploaded_file, has_header):
         return pd.read_parquet(uploaded_file)
     return pd.read_csv(uploaded_file, header=0 if has_header else None)
 
+# --- JIS標準地域メッシュ変換関数 ---
+def decode_mesh_code(code):
+    if pd.isna(code):
+        return np.nan, np.nan
+    s = str(code).split(".")[0].strip()
+    if not s.isdigit() or len(s) < 4:
+        return np.nan, np.nan
+    p = int(s[0:2])
+    u = int(s[2:4])
+    lat = p * 2.0 / 3.0
+    lon = u + 100.0
+    d_lat, d_lon = 2.0 / 3.0, 1.0
+    if len(s) >= 6:
+        q, v = int(s[4]), int(s[5])
+        d_lat /= 8.0
+        d_lon /= 8.0
+        lat += q * d_lat
+        lon += v * d_lon
+    if len(s) >= 8:
+        r, w = int(s[6]), int(s[7])
+        d_lat /= 10.0
+        d_lon /= 10.0
+        lat += r * d_lat
+        lon += w * d_lon
+    if len(s) >= 9:
+        m4 = int(s[8])
+        d_lat /= 2.0
+        d_lon /= 2.0
+        lat += ((m4 - 1) // 2) * d_lat
+        lon += ((m4 - 1) % 2) * d_lon
+    if len(s) >= 10:
+        m5 = int(s[9])
+        d_lat /= 2.0
+        d_lon /= 2.0
+        lat += ((m5 - 1) // 2) * d_lat
+        lon += ((m5 - 1) % 2) * d_lon
+    return lat + d_lat / 2.0, lon + d_lon / 2.0
+
+def encode_latlon_to_mesh(lat_s, lon_s, level=4):
+    lat = pd.to_numeric(lat_s, errors="coerce")
+    lon = pd.to_numeric(lon_s, errors="coerce")
+    valid = lat.notna() & lon.notna()
+    res = pd.Series(index=lat.index, dtype="object")
+    if not valid.any():
+        return res
+    la = lat[valid].values
+    lo = lon[valid].values
+    p = np.floor(la * 1.5).astype(int)
+    u = np.floor(lo - 100).astype(int)
+    rem_la1 = la * 1.5 - p
+    rem_lo1 = (lo - 100) - u
+    q = np.floor(rem_la1 * 8).astype(int)
+    v = np.floor(rem_lo1 * 8).astype(int)
+    rem_la2 = rem_la1 * 8 - q
+    rem_lo2 = rem_lo1 * 8 - v
+    r = np.floor(rem_la2 * 10).astype(int)
+    w = np.floor(rem_lo2 * 10).astype(int)
+    if level == 3:
+        codes = [f"{a:02d}{b:02d}{c}{d}{e}{f}" for a, b, c, d, e, f in zip(p, u, q, v, r, w)]
+    else:
+        rem_la3 = rem_la2 * 10 - r
+        rem_lo3 = rem_lo2 * 10 - w
+        m4 = np.floor(rem_la3 * 2).astype(int) * 2 + np.floor(rem_lo3 * 2).astype(int) + 1
+        codes = [f"{a:02d}{b:02d}{c}{d}{e}{f}{g}" for a, b, c, d, e, f, g in zip(p, u, q, v, r, w, m4)]
+    res.loc[valid] = codes
+    return res
+
 # --- サイドバー：モード切替 ---
 st.sidebar.title("⚙️ アプリ設定")
 mode = st.sidebar.radio("モードを選択", ["通常分析モード", "コンペ用モード"])
@@ -389,7 +456,12 @@ with tab4:
 
         fe_type = st.radio(
             "作成する特徴量の種類",
-            ["1. 四則演算（比率・差分など）", "2. GroupBy集約（カテゴリ別集計）", "3. 時系列（ラグ・差分・移動平均）"],
+            [
+                "1. 四則演算（比率・差分など）",
+                "2. GroupBy集約（カテゴリ別集計）",
+                "3. 時系列（ラグ・差分・移動平均）",
+                "4. 地域メッシュ（国土交通）"
+            ],
             horizontal=True
         )
 
@@ -537,6 +609,106 @@ with tab4:
                         st.session_state.train_df = work.sort_values("_orig_idx").drop(columns=["_orig_idx"]).reset_index(drop=True)
 
                     st.success(f"時系列特徴量を {len(created_cols)} 列追加しました！: {', '.join(created_cols)}")
+
+        elif fe_type == "4. 地域メッシュ（国土交通）":
+            mesh_mode = st.selectbox(
+                "メッシュ処理を選択",
+                [
+                    "A. メッシュコード → 緯度経度・上位メッシュ分解（8〜10桁対応）",
+                    "B. 緯度・経度 → 地域メッシュコード生成（1km / 500m）",
+                    "C. 外部メッシュデータ（国土数値情報等）を結合"
+                ]
+            )
+
+            if mesh_mode.startswith("A."):
+                mesh_col = st.selectbox("メッシュコードの列", all_cols, key="mesh_dec_col")
+                mesh_opts = st.multiselect(
+                    "作成する項目",
+                    ["中心緯度・経度 (lat, lon)", "1次メッシュ (4桁・約80km)", "2次メッシュ (6桁・約10km)", "3次メッシュ (8桁・約1km)"],
+                    default=["中心緯度・経度 (lat, lon)", "2次メッシュ (6桁・約10km)", "3次メッシュ (8桁・約1km)"]
+                )
+                if st.button("メッシュコードを分解・変換する"):
+                    def apply_mesh_dec(target_df):
+                        if mesh_col not in target_df.columns:
+                            return target_df
+                        s_str = target_df[mesh_col].astype(str).str.split(".").str[0].str.strip()
+                        if "中心緯度・経度 (lat, lon)" in mesh_opts:
+                            coords = s_str.map(decode_mesh_code)
+                            target_df[f"{mesh_col}_lat"] = [c[0] for c in coords]
+                            target_df[f"{mesh_col}_lon"] = [c[1] for c in coords]
+                            target_df[f"{mesh_col}_lat"] = target_df[f"{mesh_col}_lat"].astype("float32")
+                            target_df[f"{mesh_col}_lon"] = target_df[f"{mesh_col}_lon"].astype("float32")
+                        if "1次メッシュ (4桁・約80km)" in mesh_opts:
+                            target_df[f"{mesh_col}_m1"] = s_str.str[:4].astype("category")
+                        if "2次メッシュ (6桁・約10km)" in mesh_opts:
+                            target_df[f"{mesh_col}_m2"] = s_str.str[:6].astype("category")
+                        if "3次メッシュ (8桁・約1km)" in mesh_opts:
+                            target_df[f"{mesh_col}_m3"] = s_str.str[:8].astype("category")
+                        return target_df
+
+                    st.session_state.train_df = apply_mesh_dec(st.session_state.train_df)
+                    if st.session_state.test_df is not None:
+                        st.session_state.test_df = apply_mesh_dec(st.session_state.test_df)
+                    st.success(f"「{mesh_col}」のメッシュ分解・変換を完了しました！")
+
+            elif mesh_mode.startswith("B."):
+                if len(num_cols) < 2:
+                    st.warning("緯度・経度の数値列が2つ以上必要です。")
+                else:
+                    c1, c2, c3 = st.columns(3)
+                    lat_col = c1.selectbox("緯度 (lat) の列", num_cols, key="m_lat")
+                    lon_col = c2.selectbox("経度 (lon) の列", num_cols, index=min(1, len(num_cols)-1), key="m_lon")
+                    m_level = c3.selectbox("作成するメッシュ精度", ["4次メッシュ (9桁・500m)", "3次メッシュ (8桁・1km)"])
+
+                    if st.button("緯度経度からメッシュコードを生成"):
+                        lvl = 4 if "4次" in m_level else 3
+                        new_m_col = f"mesh_{'500m' if lvl == 4 else '1km'}"
+
+                        def apply_mesh_enc(target_df):
+                            if lat_col in target_df.columns and lon_col in target_df.columns:
+                                target_df[new_m_col] = encode_latlon_to_mesh(target_df[lat_col], target_df[lon_col], level=lvl).astype("category")
+                            return target_df
+
+                        st.session_state.train_df = apply_mesh_enc(st.session_state.train_df)
+                        if st.session_state.test_df is not None:
+                            st.session_state.test_df = apply_mesh_enc(st.session_state.test_df)
+                        st.success(f"メッシュコード列「{new_m_col}」を生成しました！")
+
+            elif mesh_mode.startswith("C."):
+                ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet)", type=["csv", "parquet"], key="ext_mesh_file")
+                if ext_file:
+                    ext_df, _, _ = load_file(ext_file)
+                    st.caption(f"外部データ: {ext_df.shape[0]:,}行 × {ext_df.shape[1]}列")
+                    c1, c2 = st.columns(2)
+                    left_key = c1.selectbox("Train/Test側の結合キー（メッシュ列など）", all_cols, key="ext_lkey")
+                    right_key = c2.selectbox("外部データ側の結合キー", ext_df.columns.tolist(), key="ext_rkey")
+                    add_cols = st.multiselect(
+                        "結合して追加する外部データの列",
+                        [c for c in ext_df.columns if c != right_key],
+                        default=[c for c in ext_df.columns if c != right_key][:5]
+                    )
+
+                    if st.button("外部メッシュデータを結合 (Left Join)"):
+                        if not add_cols:
+                            st.warning("追加する列を1つ以上選んでください。")
+                        else:
+                            ext_sub = ext_df[[right_key] + add_cols].copy()
+                            ext_sub["_join_key"] = ext_sub[right_key].astype(str).str.split(".").str[0].str.strip()
+                            # 同一メッシュに複数行ある場合は先頭1件（重複による行数増加を防止）
+                            ext_sub = ext_sub.drop_duplicates(subset=["_join_key"]).drop(columns=[right_key])
+
+                            def apply_ext_join(target_df):
+                                if left_key not in target_df.columns:
+                                    return target_df
+                                target_df = target_df.copy()
+                                target_df["_join_key"] = target_df[left_key].astype(str).str.split(".").str[0].str.strip()
+                                merged = target_df.merge(ext_sub, on="_join_key", how="left", suffixes=("", "_ext"))
+                                return merged.drop(columns=["_join_key"])
+
+                            st.session_state.train_df = apply_ext_join(st.session_state.train_df)
+                            if st.session_state.test_df is not None:
+                                st.session_state.test_df = apply_ext_join(st.session_state.test_df)
+                            st.success(f"外部データから {len(add_cols)} 列を結合しました！")
 
 # ==========================================
 # TAB 5: 機械学習・評価
@@ -694,7 +866,6 @@ with tab5:
 
                     progress.progress((fold + 1) / len(splits))
 
-                # 予測結果をタブ6用に保存
                 if test_preds is not None:
                     st.session_state.test_preds = test_preds
                     st.session_state.last_model_name = model_name.split()[0]
@@ -793,7 +964,6 @@ with tab6:
     else:
         preds = st.session_state.test_preds.copy()
 
-        # 予測値の後処理
         st.write("#### 1. 予測値の後処理（任意）")
         p1, p2, p3 = st.columns(3)
         clip_zero = p1.checkbox("0未満を0にクリップ", value=False)
@@ -809,7 +979,6 @@ with tab6:
             preds = np.rint(preds).astype(int)
 
         st.write("#### 2. フォーマット設定")
-        # sample_submission が読み込まれている場合
         if st.session_state.sub_template_df is not None:
             sub_df = st.session_state.sub_template_df.copy()
             if len(sub_df) != len(preds):
@@ -828,8 +997,6 @@ with tab6:
             )
             sub_df[target_sub_col] = preds
             st.success("読み込んだ sample_submit のフォーマットに予測値を埋め込みました。")
-
-        # sample_submission がない場合は test データから自動生成
         else:
             st.caption("※タブ1で sample_submit を読み込んでいないため、Testデータから作成します。")
             raw_test = st.session_state.test_raw_df
@@ -844,7 +1011,6 @@ with tab6:
             else:
                 sub_df = pd.DataFrame({pred_col_name: preds})
 
-        # 提出前チェック
         st.write("#### 3. 提出前チェック")
         chk1, chk2, chk3, chk4 = st.columns(4)
         chk1.metric("行数", f"{len(sub_df):,}")
