@@ -55,7 +55,7 @@ def get_all_datasets():
     """管理中の全データセットを辞書で返す"""
     datasets = {}
     if st.session_state.train_df is not None:
-        datasets["train"] = st.session_state.train_df
+        datasets[st.session_state.train_name] = st.session_state.train_df
     if st.session_state.test_df is not None:
         datasets["test"] = st.session_state.test_df
     for name, df_val in st.session_state.extra_dfs.items():
@@ -65,19 +65,20 @@ def get_all_datasets():
 def render_custom_save_ui(key_prefix):
     st.divider()
     st.write("### 💾 現在のデータを名前を付けて保存")
+    main_label = st.session_state.train_name
     c1, c2 = st.columns(2)
     with c1:
-        tr_name = st.text_input("Trainのファイル名（拡張子不要）", value="train_processed", key=f"{key_prefix}_tr_name")
+        tr_name = st.text_input(f"{main_label}のファイル名（拡張子不要）", value=f"{main_label}_processed", key=f"{key_prefix}_tr_name")
         b1, b2 = st.columns(2)
         b1.download_button(
-            "📥 Train (CSV)",
+            f"📥 {main_label} (CSV)",
             data=st.session_state.train_df.to_csv(index=False).encode("utf-8"),
             file_name=f"{tr_name}.csv",
             mime="text/csv",
             key=f"{key_prefix}_tr_csv"
         )
         b2.download_button(
-            "📥 Train (Parquet)",
+            f"📥 {main_label} (Parquet)",
             data=st.session_state.train_df.to_parquet(index=False),
             file_name=f"{tr_name}.parquet",
             key=f"{key_prefix}_tr_pq"
@@ -105,7 +106,8 @@ def render_live_preview():
     datasets = get_all_datasets()
     if not datasets:
         return
-    tr_info = f"Train: {st.session_state.train_df.shape[0]:,}行 × {st.session_state.train_df.shape[1]}列" if st.session_state.train_df is not None else f"登録データ: {len(datasets)}件"
+    main_name = st.session_state.train_name
+    tr_info = f"{main_name}: {st.session_state.train_df.shape[0]:,}行 × {st.session_state.train_df.shape[1]}列" if st.session_state.train_df is not None else f"登録データ: {len(datasets)}件"
     label = f"⚡ リアルタイム確認：基本統計量 & 10行プレビュー（{tr_info} / 全{len(datasets)}データ）"
     with st.expander(label, expanded=False):
         c1, c2 = st.columns(2)
@@ -319,6 +321,7 @@ def build_model(model_name, task_type, preset, seed):
 # --- セッション状態の初期化 ---
 for key, default_val in [
     ("train_df", None),
+    ("train_name", "train"),
     ("test_df", None),
     ("test_raw_df", None),
     ("extra_dfs", {}),
@@ -396,12 +399,15 @@ with tab1:
                     if f.name not in st.session_state.loaded_normal_files:
                         try:
                             df_loaded, start_m, end_m = load_file(f)
+                            base_name = os.path.splitext(f.name)[0]
                             if st.session_state.train_df is None:
                                 st.session_state.train_df = df_loaded.copy()
-                                added_names.append(f"train ({f.name})")
+                                st.session_state.train_name = base_name
+                                added_names.append(base_name)
                             else:
-                                base_name = os.path.splitext(f.name)[0]
-                                ds_name = base_name if base_name not in ["train", "test"] else f"{base_name}_2"
+                                ds_name = base_name
+                                if ds_name == st.session_state.train_name or ds_name in st.session_state.extra_dfs or ds_name == "test":
+                                    ds_name = f"{base_name}_2"
                                 st.session_state.extra_dfs[ds_name] = df_loaded.copy()
                                 added_names.append(ds_name)
                             st.session_state.loaded_normal_files.add(f.name)
@@ -413,6 +419,7 @@ with tab1:
 
                 if st.button("選択中のファイルを初期状態に再読み込み"):
                     st.session_state.train_df = None
+                    st.session_state.train_name = "train"
                     st.session_state.extra_dfs = {}
                     st.session_state.loaded_normal_files = set()
                     st.rerun()
@@ -426,6 +433,7 @@ with tab1:
                         df, start_m, end_m = load_file(train_file)
                         if st.session_state.train_df is None or st.button("trainを初期状態にリセット"):
                             st.session_state.train_df = df.copy()
+                            st.session_state.train_name = "train"
                             notify_and_refresh(f"Train読み込み完了: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
                         st.caption(f"読込済み: {df.shape[0]:,}行 × {df.shape[1]}列 | {start_m:.1f}MB→{end_m:.1f}MB")
                     except Exception as e:
@@ -534,7 +542,7 @@ with tab1:
         if st.session_state.train_df is not None:
             df_show = st.session_state.train_df
             st.divider()
-            st.write("### カラム概要（型・欠損・ユニーク数：Train）")
+            st.write(f"### カラム概要（型・欠損・ユニーク数：{st.session_state.train_name}）")
             top_vals = []
             for c in df_show.columns:
                 vc = df_show[c].value_counts(dropna=False).head(3)
@@ -568,8 +576,8 @@ with tab1:
         extra_name = c2.text_input("登録するデータ名", value=default_extra_name, key="extra_name_input")
 
         if extra_file and st.button("📥 このデータを登録する"):
-            if extra_name in ["train", "test"]:
-                st.error("「train」「test」以外の名前を指定してください。")
+            if extra_name in [st.session_state.train_name, "test"]:
+                st.error(f"「{st.session_state.train_name}」「test」以外の名前を指定してください。")
             else:
                 try:
                     e_df, e_start, e_end = load_file(extra_file)
@@ -618,8 +626,9 @@ with tab1:
             )
             mc4.write("")
             if mc4.button("🗑️ このデータを削除", key="manage_del_btn"):
-                if sel_ds == "train":
+                if sel_ds == st.session_state.train_name:
                     st.session_state.train_df = None
+                    st.session_state.train_name = "train"
                     if os.path.exists(TRAIN_CACHE_PATH):
                         os.remove(TRAIN_CACHE_PATH)
                 elif sel_ds == "test":
@@ -678,7 +687,7 @@ with tab1:
                             merged = l_work.merge(r_work, on="_m_key", how=how_opt, suffixes=("", f"_{right_name}")).drop(columns=["_m_key"])
 
                             if "上書き" in dest_opt:
-                                if left_name == "train":
+                                if left_name == st.session_state.train_name:
                                     st.session_state.train_df = merged
                                 elif left_name == "test":
                                     st.session_state.test_df = merged
@@ -694,7 +703,7 @@ with tab1:
             else:
                 sel_concat = st.multiselect("縦に結合するデータを2つ以上選択", list(datasets.keys()), default=list(datasets.keys())[:2], key="concat_sel")
                 cc1, cc2 = st.columns(2)
-                concat_dest = cc1.radio("結合結果の保存先", ["新しいデータとして登録", "Trainデータに上書き"], horizontal=True, key="concat_dest")
+                concat_dest = cc1.radio("結合結果の保存先", ["新しいデータとして登録", f"メインデータ「{st.session_state.train_name}」に上書き"], horizontal=True, key="concat_dest")
                 concat_new_name = cc2.text_input("新しいデータ名（新規登録時）", value="concat_data", key="concat_new_name")
 
                 if st.button("🔗 縦結合 (Concat) を実行"):
@@ -703,9 +712,9 @@ with tab1:
                     else:
                         try:
                             concated = pd.concat([datasets[n] for n in sel_concat], ignore_index=True)
-                            if concat_dest == "Trainデータに上書き":
+                            if "上書き" in concat_dest:
                                 st.session_state.train_df = concated
-                                notify_and_refresh(f"縦結合したデータでTrainを上書きしました！（{concated.shape[0]:,}行 × {concated.shape[1]}列）")
+                                notify_and_refresh(f"縦結合したデータで「{st.session_state.train_name}」を上書きしました！（{concated.shape[0]:,}行 × {concated.shape[1]}列）")
                             else:
                                 st.session_state.extra_dfs[concat_new_name] = concated
                                 notify_and_refresh(f"縦結合データ「{concat_new_name}」を新規登録しました！（{concated.shape[0]:,}行 × {concated.shape[1]}列）")
@@ -933,13 +942,14 @@ with tab3:
 
         elif prep_mode == "4. 条件で抽出・出力":
             st.write("### 条件を指定して該当する行だけを抽出・出力")
-            target_options = ["Trainデータ"] + (["Testデータ"] if st.session_state.test_df is not None else [])
+            main_label = f"{st.session_state.train_name}データ"
+            target_options = [main_label] + (["Testデータ"] if st.session_state.test_df is not None else [])
             fc1, fc2, fc3 = st.columns(3)
             flt_target = fc1.selectbox("対象データ", target_options, key="flt_target")
             n_conds = fc2.selectbox("条件の数", [1, 2, 3], index=0, key="flt_n_conds")
             logic_op = fc3.radio("複数条件のつなぎ方", ["AND（すべて満たす）", "OR（いずれかを満たす）"], horizontal=True, key="flt_logic")
 
-            src_df = st.session_state.train_df if flt_target == "Trainデータ" else st.session_state.test_df
+            src_df = st.session_state.train_df if flt_target == main_label else st.session_state.test_df
             src_cols = src_df.columns.tolist()
 
             masks = []
@@ -1013,7 +1023,7 @@ with tab3:
                 key="flt_dl_pq"
             )
             if fb3.button(f"⚠️ この抽出結果で{flt_target}を上書き", key="flt_overwrite"):
-                if flt_target == "Trainデータ":
+                if flt_target == main_label:
                     st.session_state.train_df = filtered_df.reset_index(drop=True)
                 else:
                     st.session_state.test_df = filtered_df.reset_index(drop=True)
@@ -1021,7 +1031,8 @@ with tab3:
 
         elif prep_mode == "5. 特定行の削除":
             st.write("### 特定の行を削除する")
-            del_target_opts = ["Trainデータ"] + (["Testデータ（注意：提出行数が変わります）"] if st.session_state.test_df is not None else [])
+            main_label = f"{st.session_state.train_name}データ"
+            del_target_opts = [main_label] + (["Testデータ（注意：提出行数が変わります）"] if st.session_state.test_df is not None else [])
             dc1, dc2 = st.columns(2)
             del_target = dc1.selectbox("対象データ", del_target_opts, key="del_row_target")
             del_method = dc2.selectbox(
@@ -1034,7 +1045,7 @@ with tab3:
                 ]
             )
 
-            is_train_del = del_target.startswith("Train")
+            is_train_del = (del_target == main_label)
             target_df = st.session_state.train_df if is_train_del else st.session_state.test_df
             t_cols = target_df.columns.tolist()
 
@@ -1660,7 +1671,7 @@ with tab5:
 # TAB 6: 提出・データ出力 (Submit)
 # ==========================================
 with tab6:
-    st.subheader("📦 加工済みデータの出力 (Train / Test)")
+    st.subheader("📦 加工済みデータの出力")
     if st.session_state.train_df is None:
         st.info("先にタブ1でデータを読み込んでください。")
     else:
