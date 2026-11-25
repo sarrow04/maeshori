@@ -354,41 +354,74 @@ with tab1:
     if st.session_state.train_df is not None:
         df_show = st.session_state.train_df
 
-        # --- コンペ用モード限定：Train / Test 共通ユニーク値なしチェック ---
+        # --- コンペ用モード限定：文字列カラムのTrain/Test非共通ユニーク値チェック ---
         if mode == "コンペ用モード" and st.session_state.test_df is not None:
             st.divider()
-            st.write("### 🔍 【コンペ用】Train / Test でユニーク値に共通点がないカラム")
+            st.write("### 🔍 【コンペ用】文字列カラムのTrain / Test 非共通ユニーク値")
             te_show = st.session_state.test_df
-            common_cols = [c for c in df_show.columns if c in te_show.columns]
 
-            no_overlap_rows = []
-            for c in common_cols:
-                tr_u = set(df_show[c].dropna().unique())
-                te_u = set(te_show[c].dropna().unique())
-                if len(tr_u & te_u) == 0:
-                    no_overlap_rows.append({
-                        "カラム名": c,
-                        "型": str(df_show[c].dtype),
-                        "Trainユニーク数": len(tr_u),
-                        "Testユニーク数": len(te_u),
-                        "共通ユニーク数": 0,
-                        "Trainサンプル（上位3件）": ", ".join(map(str, list(tr_u)[:3])),
-                        "Testサンプル（上位3件）": ", ".join(map(str, list(te_u)[:3]))
-                    })
-
-            if no_overlap_rows:
-                no_overlap_df = pd.DataFrame(no_overlap_rows)
-                st.warning(f"TrainとTestで共通のユニーク値が1つもないカラムが **{len(no_overlap_df)}列** 見つかりました（ID列や時期が完全に異なる列の可能性があります）。")
-                st.dataframe(no_overlap_df, use_container_width=True)
-                st.download_button(
-                    "📥 共通点なしカラム一覧をCSV出力",
-                    data=no_overlap_df.to_csv(index=False).encode("utf-8"),
-                    file_name="no_overlap_columns.csv",
-                    mime="text/csv",
-                    key="dl_no_overlap_csv"
+            # 文字列・カテゴリ型の共通カラムだけを抽出
+            str_common_cols = [
+                c for c in df_show.columns
+                if c in te_show.columns and (
+                    pd.api.types.is_object_dtype(df_show[c])
+                    or pd.api.types.is_string_dtype(df_show[c])
+                    or isinstance(df_show[c].dtype, pd.CategoricalDtype)
                 )
+            ]
+
+            diff_summary = []
+            diff_details = {}
+            for c in str_common_cols:
+                tr_u = set(df_show[c].dropna().astype(str).unique())
+                te_u = set(te_show[c].dropna().astype(str).unique())
+                tr_only = sorted(tr_u - te_u)
+                te_only = sorted(te_u - tr_u)
+                if len(tr_only) > 0 or len(te_only) > 0:
+                    diff_summary.append({
+                        "カラム名": c,
+                        "共通ユニーク数": len(tr_u & te_u),
+                        "Trainのみ(個)": len(tr_only),
+                        "Testのみ(個)": len(te_only),
+                        "Trainのみの値(一部)": ", ".join(tr_only[:5]),
+                        "Testのみの値(一部)": ", ".join(te_only[:5]),
+                    })
+                    diff_details[c] = (tr_only, te_only)
+
+            if diff_summary:
+                diff_summary_df = pd.DataFrame(diff_summary)
+                st.warning(f"文字列カラムのうち **{len(diff_summary_df)}列** で、TrainとTestに共通していない値が見つかりました。")
+                st.dataframe(diff_summary_df, use_container_width=True)
+
+                # 個別カラムの非共通値を全件表示＆CSV出力
+                sel_diff_col = st.selectbox("非共通の値をすべて見るカラムを選択", list(diff_details.keys()), key="sel_diff_col")
+                if sel_diff_col:
+                    tr_only, te_only = diff_details[sel_diff_col]
+                    detail_rows = (
+                        [{"区分": "Testのみ（未知の値）", "値": v} for v in te_only]
+                        + [{"区分": "Trainのみ", "値": v} for v in tr_only]
+                    )
+                    detail_df = pd.DataFrame(detail_rows)
+                    st.caption(f"「{sel_diff_col}」の非共通値: Testのみ {len(te_only):,}個 / Trainのみ {len(tr_only):,}個")
+                    st.dataframe(detail_df, use_container_width=True)
+
+                    b1, b2 = st.columns(2)
+                    b1.download_button(
+                        f"📥 「{sel_diff_col}」の非共通値一覧をCSV出力",
+                        data=detail_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"diff_unique_{sel_diff_col}.csv",
+                        mime="text/csv",
+                        key="dl_diff_detail_csv"
+                    )
+                    b2.download_button(
+                        "📥 全カラムの非共通サマリーをCSV出力",
+                        data=diff_summary_df.to_csv(index=False).encode("utf-8"),
+                        file_name="diff_unique_summary.csv",
+                        mime="text/csv",
+                        key="dl_diff_summary_csv"
+                    )
             else:
-                st.success("TrainとTestの共通カラムすべてに、1つ以上の共通ユニーク値が存在します（完全不一致のカラムはありません）。")
+                st.success("文字列カラムにTrain / Test間の非共通ユニーク値はありませんでした。")
 
         st.divider()
         st.write("### カラム概要（型・欠損・ユニーク数）")
