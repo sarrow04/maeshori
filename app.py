@@ -404,7 +404,7 @@ with tab2:
                 st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
-# TAB 3: 前処理（基本・日付分解・文字列抽出）
+# TAB 3: 前処理（基本・日付分解・文字列抽出・条件抽出）
 # ==========================================
 with tab3:
     if st.session_state.train_df is None:
@@ -415,7 +415,12 @@ with tab3:
 
         prep_mode = st.radio(
             "前処理メニュー",
-            ["1. 列削除・欠損補完", "2. 日付・時刻の分解（年月・曜日など）", "3. 文字列の抜き取り・加工"],
+            [
+                "1. 列削除・欠損補完",
+                "2. 日付・時刻の分解（年月・曜日など）",
+                "3. 文字列の抜き取り・加工",
+                "4. 条件で抽出・出力（フィルタリング）"
+            ],
             horizontal=True
         )
 
@@ -554,6 +559,97 @@ with tab3:
                     st.dataframe(st.session_state.train_df[[str_col, new_str_col]].head(5), use_container_width=True)
                 except Exception as e:
                     st.error(f"処理中にエラーが発生しました: {e}")
+
+        elif prep_mode == "4. 条件で抽出・出力（フィルタリング）":
+            st.write("### 条件を指定して該当する行だけを抽出・出力")
+            target_options = ["Trainデータ"] + (["Testデータ"] if st.session_state.test_df is not None else [])
+            fc1, fc2, fc3 = st.columns(3)
+            flt_target = fc1.selectbox("対象データ", target_options, key="flt_target")
+            n_conds = fc2.selectbox("条件の数", [1, 2, 3], index=0, key="flt_n_conds")
+            logic_op = fc3.radio("複数条件のつなぎ方", ["AND（すべて満たす）", "OR（いずれかを満たす）"], horizontal=True, key="flt_logic")
+
+            src_df = st.session_state.train_df if flt_target == "Trainデータ" else st.session_state.test_df
+            src_cols = src_df.columns.tolist()
+
+            masks = []
+            for i in range(n_conds):
+                st.markdown(f"**条件 {i + 1}**")
+                cc1, cc2, cc3 = st.columns(3)
+                f_col = cc1.selectbox("カラム", src_cols, key=f"flt_col_{i}")
+                is_num = pd.api.types.is_numeric_dtype(src_df[f_col])
+
+                if is_num:
+                    ops = ["以上 (>=)", "より大きい (>)", "以下 (<=)", "未満 (<)", "等しい (==)", "等しくない (!=)", "欠損値である (NaN)", "欠損値でない"]
+                else:
+                    ops = ["を含む", "を含まない", "完全一致 (==)", "一致しない (!=)", "欠損値である (NaN)", "欠損値でない"]
+
+                f_op = cc2.selectbox("条件", ops, key=f"flt_op_{i}")
+
+                if "欠損値" in f_op:
+                    cc3.write("")
+                    m = src_df[f_col].isnull() if "である" in f_op else src_df[f_col].notnull()
+                elif is_num:
+                    f_val = cc3.number_input("値（数値）", value=0.0, format="%g", key=f"flt_num_{i}")
+                    if f_op == "以上 (>=)":
+                        m = src_df[f_col] >= f_val
+                    elif f_op == "より大きい (>)":
+                        m = src_df[f_col] > f_val
+                    elif f_op == "以下 (<=)":
+                        m = src_df[f_col] <= f_val
+                    elif f_op == "未満 (<)":
+                        m = src_df[f_col] < f_val
+                    elif f_op == "等しい (==)":
+                        m = src_df[f_col] == f_val
+                    else:
+                        m = src_df[f_col] != f_val
+                else:
+                    f_val = cc3.text_input("値（文字列）", value="", key=f"flt_str_{i}")
+                    s_str = src_df[f_col].astype(str)
+                    if f_op == "を含む":
+                        m = s_str.str.contains(f_val, na=False, regex=False)
+                    elif f_op == "を含まない":
+                        m = ~s_str.str.contains(f_val, na=False, regex=False)
+                    elif f_op == "完全一致 (==)":
+                        m = s_str == f_val
+                    else:
+                        m = s_str != f_val
+
+                masks.append(m.fillna(False))
+
+            # 条件の結合
+            final_mask = masks[0]
+            for m in masks[1:]:
+                final_mask = (final_mask & m) if "AND" in logic_op else (final_mask | m)
+
+            filtered_df = src_df[final_mask].copy()
+            ratio = (len(filtered_df) / len(src_df) * 100) if len(src_df) > 0 else 0.0
+            st.success(f"抽出結果: **{len(filtered_df):,}行** / {len(src_df):,}行（{ratio:.2f}%）")
+            st.dataframe(filtered_df.head(50), use_container_width=True)
+
+            # 抽出データだけの保存＆上書き
+            st.write("#### 抽出したデータの保存・反映")
+            out_name = st.text_input("抽出データのファイル名（拡張子不要）", value="filtered_data", key="flt_out_name")
+            fb1, fb2, fb3 = st.columns(3)
+            fb1.download_button(
+                "📥 抽出データをCSVで保存",
+                data=filtered_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"{out_name}.csv",
+                mime="text/csv",
+                key="flt_dl_csv"
+            )
+            fb2.download_button(
+                "📥 抽出データをParquetで保存",
+                data=filtered_df.to_parquet(index=False),
+                file_name=f"{out_name}.parquet",
+                key="flt_dl_pq"
+            )
+            if fb3.button(f"⚠️ この抽出結果で{flt_target}を上書き", key="flt_overwrite"):
+                if flt_target == "Trainデータ":
+                    st.session_state.train_df = filtered_df.reset_index(drop=True)
+                else:
+                    st.session_state.test_df = filtered_df.reset_index(drop=True)
+                save_backup()
+                st.success(f"{flt_target}を抽出結果（{len(filtered_df):,}行）で上書きしました！")
 
         # 名前を付けて保存エリア
         render_custom_save_ui("tab3")
