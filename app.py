@@ -199,35 +199,156 @@ with tab2:
                 st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
-# TAB 3: 前処理
+# TAB 3: 前処理（基本・日付分解・文字列抽出）
 # ==========================================
 with tab3:
     if st.session_state.train_df is None:
         st.info("先にタブ1でデータを読み込んでください。")
     else:
         df = st.session_state.train_df
-        st.write("### 欠損値の確認")
-        null_df = pd.DataFrame({"欠損数": df.isnull().sum(), "欠損率(%)": (df.isnull().mean() * 100).round(2), "型": df.dtypes.astype(str)})
-        st.dataframe(null_df[null_df["欠損数"] > 0], use_container_width=True)
+        all_cols = df.columns.tolist()
 
-        st.write("### 基本前処理の実行")
-        drop_cols = st.multiselect("削除する列（ID列など）", df.columns.tolist())
-        fill_method = st.selectbox("数値列の欠損補完", ["何もしない（LightGBMに任せる）", "中央値で補完", "平均値で補完", "0で補完"])
+        prep_mode = st.radio(
+            "前処理メニュー",
+            ["1. 列削除・欠損補完", "2. 日付・時刻の分解（年月・曜日など）", "3. 文字列の抜き取り・加工"],
+            horizontal=True
+        )
 
-        if st.button("前処理を適用する"):
-            if drop_cols:
-                st.session_state.train_df = st.session_state.train_df.drop(columns=drop_cols, errors="ignore")
-                if st.session_state.test_df is not None:
-                    st.session_state.test_df = st.session_state.test_df.drop(columns=drop_cols, errors="ignore")
+        # --- 1. 基本前処理 ---
+        if prep_mode == "1. 列削除・欠損補完":
+            st.write("### 欠損値の確認")
+            null_df = pd.DataFrame({"欠損数": df.isnull().sum(), "欠損率(%)": (df.isnull().mean() * 100).round(2), "型": df.dtypes.astype(str)})
+            st.dataframe(null_df[null_df["欠損数"] > 0], use_container_width=True)
 
-            if fill_method != "何もしない（LightGBMに任せる）":
-                num_c = st.session_state.train_df.select_dtypes(include=[np.number]).columns
-                for c in num_c:
-                    val = st.session_state.train_df[c].median() if "中央値" in fill_method else (st.session_state.train_df[c].mean() if "平均値" in fill_method else 0)
-                    st.session_state.train_df[c] = st.session_state.train_df[c].fillna(val)
-                    if st.session_state.test_df is not None and c in st.session_state.test_df.columns:
-                        st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
-            st.success("前処理を適用しました！")
+            st.write("### 列削除・欠損補完の実行")
+            drop_cols = st.multiselect("削除する列（ID列など）", all_cols)
+            fill_method = st.selectbox("数値列の欠損補完", ["何もしない（LightGBMに任せる）", "中央値で補完", "平均値で補完", "0で補完"])
+
+            if st.button("基本前処理を適用する"):
+                if drop_cols:
+                    st.session_state.train_df = st.session_state.train_df.drop(columns=drop_cols, errors="ignore")
+                    if st.session_state.test_df is not None:
+                        st.session_state.test_df = st.session_state.test_df.drop(columns=drop_cols, errors="ignore")
+
+                if fill_method != "何もしない（LightGBMに任せる）":
+                    num_c = st.session_state.train_df.select_dtypes(include=[np.number]).columns
+                    for c in num_c:
+                        val = st.session_state.train_df[c].median() if "中央値" in fill_method else (st.session_state.train_df[c].mean() if "平均値" in fill_method else 0)
+                        st.session_state.train_df[c] = st.session_state.train_df[c].fillna(val)
+                        if st.session_state.test_df is not None and c in st.session_state.test_df.columns:
+                            st.session_state.test_df[c] = st.session_state.test_df[c].fillna(val)
+                st.success("基本前処理を適用しました！")
+
+        # --- 2. 日付・時刻の分解 ---
+        elif prep_mode == "2. 日付・時刻の分解（年月・曜日など）":
+            st.write("### 日付列を年・月・日・曜日などに分解")
+            dt_col = st.selectbox("日付・時刻の列を選択", all_cols, key="dt_col")
+            dt_parts = st.multiselect(
+                "作成する項目を選択",
+                ["年 (year)", "月 (month)", "日 (day)", "曜日 (dayofweek: 0=月〜6=日)", "土日フラグ (is_weekend)", "時 (hour)"],
+                default=["年 (year)", "月 (month)", "日 (day)", "曜日 (dayofweek: 0=月〜6=日)"]
+            )
+            drop_orig_dt = st.checkbox("分解後、元の日付列を削除する", value=False)
+
+            if st.button("日付を分解する"):
+                if not dt_parts:
+                    st.warning("作成する項目を1つ以上選んでください。")
+                else:
+                    def apply_dt(target_df):
+                        if dt_col not in target_df.columns:
+                            return target_df
+                        s = pd.to_datetime(target_df[dt_col], errors="coerce")
+                        if "年 (year)" in dt_parts:
+                            target_df[f"{dt_col}_year"] = s.dt.year.astype("float32")
+                        if "月 (month)" in dt_parts:
+                            target_df[f"{dt_col}_month"] = s.dt.month.astype("float32")
+                        if "日 (day)" in dt_parts:
+                            target_df[f"{dt_col}_day"] = s.dt.day.astype("float32")
+                        if "曜日 (dayofweek: 0=月〜6=日)" in dt_parts:
+                            target_df[f"{dt_col}_dayofweek"] = s.dt.dayofweek.astype("float32")
+                        if "土日フラグ (is_weekend)" in dt_parts:
+                            target_df[f"{dt_col}_is_weekend"] = (s.dt.dayofweek >= 5).astype("int8")
+                        if "時 (hour)" in dt_parts:
+                            target_df[f"{dt_col}_hour"] = s.dt.hour.astype("float32")
+                        if drop_orig_dt:
+                            target_df = target_df.drop(columns=[dt_col])
+                        return target_df
+
+                    st.session_state.train_df = apply_dt(st.session_state.train_df)
+                    if st.session_state.test_df is not None:
+                        st.session_state.test_df = apply_dt(st.session_state.test_df)
+                    st.success(f"「{dt_col}」を分解しました！")
+
+        # --- 3. 文字列の抜き取り・加工 ---
+        elif prep_mode == "3. 文字列の抜き取り・加工":
+            st.write("### 特定の文字列を抜き取る・フラグ化する")
+            str_col = st.selectbox("対象の列を選択", all_cols, key="str_col")
+            str_op = st.selectbox(
+                "抜き取り方法",
+                [
+                    "数値だけを抜き取る（例: 徒歩10分 → 10）",
+                    "特定の文字を含むかフラグ化 (0/1)",
+                    "区切り文字で分割してN番目を取得",
+                    "先頭または末尾からN文字を抜き取る",
+                    "正規表現で抜き取る（上級者向け）"
+                ]
+            )
+
+            param1, param2 = None, None
+            default_new_name = f"{str_col}_extracted"
+
+            if "数値だけ" in str_op:
+                default_new_name = f"{str_col}_num"
+            elif "含むかフラグ" in str_op:
+                param1 = st.text_input("検索する文字列（例: 駅、東京 など）", value="")
+                default_new_name = f"{str_col}_has_{param1}" if param1 else f"{str_col}_flag"
+            elif "区切り文字" in str_op:
+                c1, c2 = st.columns(2)
+                param1 = c1.text_input("区切り文字（例: / , - スペース など）", value="-")
+                param2 = c2.number_input("何番目を取得するか（0が先頭）", min_value=0, max_value=20, value=0, step=1)
+                default_new_name = f"{str_col}_part{int(param2)}"
+            elif "先頭または末尾" in str_op:
+                c1, c2 = st.columns(2)
+                param1 = c1.radio("位置", ["先頭から", "末尾から"], horizontal=True)
+                param2 = c2.number_input("文字数", min_value=1, max_value=50, value=3, step=1)
+                default_new_name = f"{str_col}_{'head' if param1 == '先頭から' else 'tail'}{int(param2)}"
+            elif "正規表現" in str_op:
+                param1 = st.text_input("正規表現パターン（抜き出したい部分を () で囲む 例: ([A-Z]+)）", value=r"(\d+)")
+                default_new_name = f"{str_col}_regex"
+
+            new_str_col = st.text_input("新しく作る列名", value=default_new_name)
+
+            if st.button("文字列の抜き取りを実行"):
+                try:
+                    def apply_str(target_df):
+                        if str_col not in target_df.columns:
+                            return target_df
+                        s = target_df[str_col].astype(str)
+                        if "数値だけ" in str_op:
+                            ext = s.str.extract(r"(-?\d+\.?\d*)")[0]
+                            target_df[new_str_col] = pd.to_numeric(ext, errors="coerce").astype("float32")
+                        elif "含むかフラグ" in str_op:
+                            target_df[new_str_col] = s.str.contains(param1, na=False, regex=False).astype("int8")
+                        elif "区切り文字" in str_op:
+                            target_df[new_str_col] = s.str.split(param1).str.get(int(param2)).astype("category")
+                        elif "先頭または末尾" in str_op:
+                            n = int(param2)
+                            if param1 == "先頭から":
+                                target_df[new_str_col] = s.str[:n].astype("category")
+                            else:
+                                target_df[new_str_col] = s.str[-n:].astype("category")
+                        elif "正規表現" in str_op:
+                            ext = s.str.extract(param1)[0]
+                            target_df[new_str_col] = ext.astype("category")
+                        return target_df
+
+                    st.session_state.train_df = apply_str(st.session_state.train_df)
+                    if st.session_state.test_df is not None:
+                        st.session_state.test_df = apply_str(st.session_state.test_df)
+                    st.success(f"新しい列「{new_str_col}」を作成しました！")
+                    st.dataframe(st.session_state.train_df[[str_col, new_str_col]].head(5), use_container_width=True)
+                except Exception as e:
+                    st.error(f"処理中にエラーが発生しました: {e}")
 
 # ==========================================
 # TAB 4: 特徴量エンジニアリング
@@ -401,7 +522,6 @@ with tab5:
         df = st.session_state.train_df
         all_cols = df.columns.tolist()
 
-        # --- 基本設定 ---
         c1, c2, c3 = st.columns(3)
         target_col = c1.selectbox("目的変数 (Target)", all_cols, index=len(all_cols)-1)
         task_type = c2.selectbox("タスク種別", ["回帰", "二値分類"])
@@ -410,11 +530,9 @@ with tab5:
             ["LightGBM", "決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)", "線形モデル (Ridge / Logistic)"]
         )
 
-        # --- 使用する特徴量カラムの選択 ---
         default_features = [c for c in all_cols if c != target_col]
         feature_cols = st.multiselect("学習に使う特徴量カラムを選択", default_features, default=default_features)
 
-        # --- CV・評価指標設定 ---
         c4, c5, c6 = st.columns(3)
         cv_type = c4.selectbox("CV（分割）方法", ["K-Fold / Stratified K-Fold（通常）", "TimeSeriesSplit（時系列分析用）"])
         n_splits = c5.slider("CV分割数", 3, 10, 5)
@@ -429,7 +547,6 @@ with tab5:
         if "TimeSeriesSplit" in cv_type:
             ts_cv_sort_col = st.selectbox("時系列CV用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
 
-        # モデル別の簡易パラメータ
         max_depth = None
         if model_name in ["決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)"]:
             max_depth = st.slider("木の最大深さ (max_depth)", 2, 20, 6)
@@ -448,7 +565,6 @@ with tab5:
                 X = work_df[feature_cols].copy()
                 y = work_df[target_col].copy()
 
-                # 二値分類チェック
                 if task_type == "二値分類":
                     if y.nunique() != 2:
                         st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {y.nunique()} 個です。")
@@ -456,12 +572,10 @@ with tab5:
                     if not pd.api.types.is_numeric_dtype(y):
                         y = pd.Series(pd.factorize(y)[0])
 
-                # RMSLE (log1p) チェック
                 if use_log1p and (y < 0).any():
                     st.error("目的変数に負の値が含まれているため、log1p変換（RMSLE最適化）は使用できません。")
                     st.stop()
 
-                # テストデータ準備
                 if mode == "コンペ用モード" and st.session_state.test_df is not None:
                     missing_in_test = [c for c in feature_cols if c not in st.session_state.test_df.columns]
                     if missing_in_test:
@@ -471,14 +585,12 @@ with tab5:
                 else:
                     X_test = None
 
-                # モデル別の型処理
                 if model_name == "LightGBM":
                     for col in X.select_dtypes(include=["object", "string"]).columns:
                         X[col] = X[col].astype("category")
                         if X_test is not None:
                             X_test[col] = X_test[col].astype("category")
                 else:
-                    # 決定木・RF・線形モデルはカテゴリを数値化＆欠損を中央値補完
                     for col in X.columns:
                         if not pd.api.types.is_numeric_dtype(X[col]):
                             cat_type = X[col].astype("category")
@@ -491,7 +603,6 @@ with tab5:
                         if X_test is not None:
                             X_test[col] = X_test[col].fillna(med)
 
-                # CV分割器
                 if "TimeSeriesSplit" in cv_type:
                     splitter = TimeSeriesSplit(n_splits=n_splits)
                     splits = list(splitter.split(X))
@@ -514,7 +625,6 @@ with tab5:
                     y_tr_fit = np.log1p(y_tr) if use_log1p else y_tr
                     y_va_fit = np.log1p(y_va) if use_log1p else y_va
 
-                    # モデル定義
                     if model_name == "LightGBM":
                         if task_type == "回帰":
                             model = lgb.LGBMRegressor(n_estimators=1000, learning_rate=0.05, random_state=42 + fold, n_jobs=-1)
@@ -534,7 +644,6 @@ with tab5:
                             model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
                         model.fit(X_tr, y_tr_fit)
 
-                    # 予測
                     if task_type == "回帰":
                         va_pred = model.predict(X_va)
                         if use_log1p:
@@ -550,7 +659,6 @@ with tab5:
                         if X_test is not None:
                             test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
 
-                    # 重要度取得
                     if hasattr(model, "feature_importances_"):
                         importances += model.feature_importances_ / len(splits)
                     elif hasattr(model, "named_steps"):
@@ -560,7 +668,6 @@ with tab5:
 
                     progress.progress((fold + 1) / len(splits))
 
-                # --- 評価指標の一覧表示 ---
                 valid_mask = ~np.isnan(oof_preds)
                 y_eval = y[valid_mask]
                 p_eval = oof_preds[valid_mask]
@@ -591,13 +698,11 @@ with tab5:
                     m3.metric("F1 Score", f"{f1:.5f}")
                     m4.metric("LogLoss（低いほど良い）", f"{ll:.5f}")
 
-                # --- 特徴量重要度 ---
                 imp_title = "特徴量重要度 (Top 20)" if model_name != "線形モデル (Ridge / Logistic)" else "回帰係数の絶対値 (Top 20)"
                 imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": importances}).sort_values("重要度", ascending=True).tail(20)
                 fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title=imp_title)
                 st.plotly_chart(fig_imp, use_container_width=True)
 
-                # --- コンペ用提出ファイル ---
                 if test_preds is not None:
                     sub_df = pd.DataFrame({"prediction": test_preds})
                     st.download_button(
