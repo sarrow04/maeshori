@@ -103,6 +103,37 @@ def classify_column(s: pd.Series) -> str:
 
     return "その他"
 
+# --- キーワードルール解析・適用関数 ---
+def parse_keyword_rules(rule_text: str):
+    rules = []
+    for line in rule_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        sep = ":" if ":" in line else ("：" if "：" in line else None)
+        if not sep:
+            continue
+        label, kws_str = line.split(sep, 1)
+        label = label.strip()
+        kws = [k.strip() for k in kws_str.replace("、", ",").split(",") if k.strip()]
+        if label and kws:
+            rules.append((label, kws))
+    return rules
+
+def apply_keyword_rules_series(s: pd.Series, rules: list, default_label: str) -> pd.Series:
+    s_str = s.astype(str)
+    result = pd.Series(default_label, index=s.index, dtype="object")
+    assigned = pd.Series(False, index=s.index)
+    for label, kws in rules:
+        mask = pd.Series(False, index=s.index)
+        for kw in kws:
+            mask = mask | s_str.str.contains(kw, case=False, na=False, regex=False)
+        hit = (~assigned) & mask
+        result.loc[hit] = label
+        assigned = assigned | hit
+    result.loc[s.isna()] = default_label
+    return result.astype("category")
+
 def render_custom_save_ui(key_prefix):
     st.divider()
     st.write("### 💾 現在のデータを名前を付けて保存")
@@ -331,7 +362,6 @@ def build_model(model_name, task_type, preset, seed):
         if task_type == "回帰":
             return lgb.LGBMRegressor(random_state=seed, n_jobs=-1, verbose=-1, **params)
         else:
-            # 多クラスでもfoldごとのクラス数に合わせて自動判定させる
             return lgb.LGBMClassifier(random_state=seed, n_jobs=-1, verbose=-1, **params)
 
     elif model_name == "決定木 (DecisionTree)":
@@ -1327,13 +1357,14 @@ with tab3:
                         notify_and_refresh(f"欠損行 {na_cnt:,}行を削除しました（残り {len(new_df):,}行）")
 
         elif prep_mode == "6. カラムの分類・ビニング":
-            st.write("### 数値列の区間分類・型変換・レア値の統合")
+            st.write("### 数値列の区間分類・型変換・レア値統合・キーワードルール分類")
             bin_op = st.radio(
                 "処理を選択",
                 [
                     "A. 数値列を区間で分類（ランク分け）",
                     "B. カラムの型を変換（数値 / カテゴリ）",
-                    "C. レアな値を「その他」にまとめる（多クラス分類向け）"
+                    "C. レアな値を「その他」にまとめる",
+                    "D. キーワードルールで分類（優先順位つき＋平均集計）"
                 ],
                 horizontal=True
             )
@@ -1403,7 +1434,7 @@ with tab3:
                             st.session_state.test_df = apply_conv(st.session_state.test_df)
                         notify_and_refresh(f"{len(conv_cols)}列を「{conv_type}」に変換しました！")
 
-            else:
+            elif bin_op.startswith("C."):
                 rc1, rc2 = st.columns(2)
                 rare_col = rc1.selectbox("対象の列を選択（例: name）", all_cols, key="rare_col")
                 rare_mode = rc2.selectbox("まとめ方", ["出現回数がN回未満をまとめる", "出現数上位K個以外をまとめる"], key="rare_mode")
@@ -1440,6 +1471,88 @@ with tab3:
                     if st.session_state.test_df is not None:
                         st.session_state.test_df = apply_rare(st.session_state.test_df)
                     notify_and_refresh(f"「{rare_col}」のレア値（{n_rare_types:,}種類）を「{other_label}」にまとめました！")
+
+            else:
+                st.write("#### 🏷️ 優先順位つきキーワードルールで分類")
+                st.caption("1行につき「分類名: キーワード1, キーワード2, ...」の形式で入力します。**上の行ほど優先**して判定されます。")
+
+                kc1, kc2, kc3 = st.columns(3)
+                kw_col = kc1.selectbox("分類する元の列（例: name）", all_cols, key="kw_src_col")
+                kw_new_col = kc2.text_input("新しく作る列名", value=f"{kw_col}_method", key="kw_new_col")
+                kw_default = kc3.text_input("どれにも当てはまらない時の名前", value="ご飯・麺・その他", key="kw_default_lbl")
+
+                default_rule_sample = (
+                    "揚げ物: カツ, 唐揚, フライ, 天ぷら, コロッケ, 南蛮, 竜田\n"
+                    "カレー: カレー\n"
+                    "炒め: 炒め, いため, チャンプルー, ホイコーロー, チンジャオ, 麻婆, マーボー\n"
+                    "焼き: 焼, ステーキ, ハンバーグ, グリル, ソテー, ムニエル, 照り\n"
+                    "シチュー・煮込み: シチュー, 煮, 肉じゃが, 筑前煮, ストロガノフ, すき焼き"
+                )
+                rule_text = st.text_area(
+                    "分類ルール（上から優先判定）",
+                    value=default_rule_sample,
+                    height=160,
+                    key="kw_rule_text"
+                )
+
+                parsed_rules = parse_keyword_rules(rule_text)
+                if parsed_rules:
+                    preview_series = apply_keyword_rules_series(df[kw_col], parsed_rules, kw_default)
+
+                    # 分類ごとの件数・目的変数平均プレビュー
+                    agg_target = st.selectbox(
+                        "分類ごとの平均を確認する数値列（例: y）",
+                        ["なし（件数のみ）"] + num_cols,
+                        index=1 if len(num_cols) > 0 else 0,
+                        key="kw_agg_target"
+                    )
+
+                    if agg_target != "なし（件数のみ）":
+                        tmp_df = pd.DataFrame({"分類": preview_series, "値": df[agg_target]})
+                        stat_df = tmp_df.groupby("分類", observed=False)["値"].agg(件数="count", 平均="mean", 中央値="median").reset_index()
+                        stat_df["平均"] = stat_df["平均"].round(2)
+                        stat_df["中央値"] = stat_df["中央値"].round(2)
+                        stat_df = stat_df.sort_values("平均", ascending=False)
+                    else:
+                        stat_df = preview_series.value_counts().reset_index()
+                        stat_df.columns = ["分類", "件数"]
+
+                    st.write("**📊 ルール適用プレビュー（件数・平均値）**")
+                    st.dataframe(stat_df, use_container_width=True)
+
+                    # 未一致（デフォルト扱い）の値を確認
+                    unmatched_vals = df.loc[preview_series == kw_default, kw_col].dropna().astype(str).value_counts()
+                    with st.expander(f"「{kw_default}」に分類された値を確認（{len(unmatched_vals):,}種類 / {int((preview_series == kw_default).sum()):,}行）", expanded=False):
+                        if len(unmatched_vals) > 0:
+                            st.dataframe(unmatched_vals.reset_index().rename(columns={"index": "値", kw_col: "値", "count": "件数"}), use_container_width=True)
+                        else:
+                            st.success("未分類は0件です！")
+
+                    # 特定分類の0/1フラグ同時作成オプション
+                    fc1, fc2, fc3 = st.columns(3)
+                    add_flag_col = fc1.checkbox("特定分類の0/1フラグ列も同時に作る", value=False, key="kw_add_flag")
+                    flag_target_lbl = fc2.selectbox("1にする分類名", [r[0] for r in parsed_rules], key="kw_flag_lbl") if add_flag_col else None
+                    flag_col_name = fc3.text_input("フラグの列名（例: is_curry）", value="is_curry", key="kw_flag_name") if add_flag_col else None
+
+                    if st.button("✅ このルールで分類列を作成する", key="exec_kw_rule"):
+                        def apply_kw_all(target_df):
+                            if kw_col not in target_df.columns:
+                                return target_df
+                            res_s = apply_keyword_rules_series(target_df[kw_col], parsed_rules, kw_default)
+                            target_df[kw_new_col] = res_s
+                            if add_flag_col and flag_col_name:
+                                target_df[flag_col_name] = (res_s == flag_target_lbl).astype("int8")
+                            return target_df
+
+                        st.session_state.train_df = apply_kw_all(st.session_state.train_df)
+                        if st.session_state.test_df is not None:
+                            st.session_state.test_df = apply_kw_all(st.session_state.test_df)
+                        msg = f"キーワードルールで「{kw_new_col}」を作成しました！"
+                        if add_flag_col and flag_col_name:
+                            msg += f"（フラグ列「{flag_col_name}」も同時作成）"
+                        notify_and_refresh(msg)
+                else:
+                    st.warning("ルールを「分類名: キーワード1, キーワード2」の形式で1行以上入力してください。")
 
         render_custom_save_ui("tab3")
 
@@ -1945,7 +2058,6 @@ with tab5:
 
                             if model_name == "LightGBM":
                                 if task_type in ["二値分類", "多クラス分類"]:
-                                    # 学習側に存在しないラベルが検証側に混ざっていても落ちないようにフィルタ
                                     tr_classes_set = set(y_tr_fit.unique())
                                     va_seen_mask = y_va_fit.isin(tr_classes_set)
                                     if va_seen_mask.any():
@@ -1976,7 +2088,6 @@ with tab5:
                                 if X_test is not None:
                                     test_preds_proba += model.predict_proba(X_test)[:, 1] / len(splits)
                             else:
-                                # 予測確率を全クラス数 (n_classes) に安全にマッピング
                                 raw_va_proba = model.predict_proba(X_va)
                                 oof_preds[va_idx] = align_multiclass_proba(raw_va_proba, model.classes_, n_classes)
                                 if X_test is not None:
