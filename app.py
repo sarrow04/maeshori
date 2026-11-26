@@ -787,7 +787,7 @@ with tab2:
                 st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
-# TAB 3: 前処理（基本・日付分解・文字列抽出・条件抽出・特定行削除）
+# TAB 3: 前処理（基本・日付分解・文字列抽出/置換・条件抽出・特定行削除）
 # ==========================================
 with tab3:
     if st.session_state.train_df is None:
@@ -801,7 +801,7 @@ with tab3:
             [
                 "1. 列削除・欠損補完",
                 "2. 日付・時刻の分解",
-                "3. 文字列の抜き取り・加工",
+                "3. 文字列の抜き取り・置換",
                 "4. 条件で抽出・出力",
                 "5. 特定行の削除"
             ],
@@ -871,12 +871,13 @@ with tab3:
                         st.session_state.test_df = apply_dt(st.session_state.test_df)
                     notify_and_refresh(f"「{dt_col}」を分解しました！（リアルタイム確認も更新済み）")
 
-        elif prep_mode == "3. 文字列の抜き取り・加工":
-            st.write("### 特定の文字列を抜き取る・フラグ化する")
+        elif prep_mode == "3. 文字列の抜き取り・置換":
+            st.write("### 特定の文字列を抜き取る・置換する・フラグ化する")
             str_col = st.selectbox("対象の列を選択", all_cols, key="str_col")
             str_op = st.selectbox(
-                "抜き取り方法",
+                "処理方法",
                 [
+                    "文字列を置換する（例: 円 → 空文字で削除）",
                     "数値だけを抜き取る（例: 徒歩10分 → 10）",
                     "特定の文字を含むかフラグ化 (0/1)",
                     "区切り文字で分割してN番目を取得",
@@ -886,9 +887,19 @@ with tab3:
             )
 
             param1, param2 = None, None
+            use_regex_rep = False
+            overwrite_orig = False
             default_new_name = f"{str_col}_extracted"
 
-            if "数値だけ" in str_op:
+            if "置換する" in str_op:
+                c1, c2 = st.columns(2)
+                param1 = c1.text_input("置換前の文字列（検索する文字）", value="", key="rep_old")
+                param2 = c2.text_input("置換後の文字列（空欄なら削除）", value="", key="rep_new")
+                c3, c4 = st.columns(2)
+                use_regex_rep = c3.checkbox("正規表現で置換する", value=False, key="rep_regex")
+                overwrite_orig = c4.checkbox("元の列に上書きする", value=True, key="rep_overwrite")
+                default_new_name = f"{str_col}_replaced"
+            elif "数値だけ" in str_op:
                 default_new_name = f"{str_col}_num"
             elif "含むかフラグ" in str_op:
                 param1 = st.text_input("検索する文字列（例: 駅、東京 など）", value="")
@@ -907,38 +918,50 @@ with tab3:
                 param1 = st.text_input("正規表現パターン（抜き出したい部分を () で囲む 例: ([A-Z]+)）", value=r"(\d+)")
                 default_new_name = f"{str_col}_regex"
 
-            new_str_col = st.text_input("新しく作る列名", value=default_new_name)
+            if overwrite_orig:
+                new_str_col = str_col
+            else:
+                new_str_col = st.text_input("新しく作る列名", value=default_new_name)
 
-            if st.button("文字列の抜き取りを実行"):
-                try:
-                    def apply_str(target_df):
-                        if str_col not in target_df.columns:
-                            return target_df
-                        s = target_df[str_col].astype(str)
-                        if "数値だけ" in str_op:
-                            ext = s.str.extract(r"(-?\d+\.?\d*)")[0]
-                            target_df[new_str_col] = pd.to_numeric(ext, errors="coerce").astype("float32")
-                        elif "含むかフラグ" in str_op:
-                            target_df[new_str_col] = s.str.contains(param1, na=False, regex=False).astype("int8")
-                        elif "区切り文字" in str_op:
-                            target_df[new_str_col] = s.str.split(param1).str.get(int(param2)).astype("category")
-                        elif "先頭または末尾" in str_op:
-                            n = int(param2)
-                            if param1 == "先頭から":
-                                target_df[new_str_col] = s.str[:n].astype("category")
+            if st.button("文字列処理を実行"):
+                if "置換する" in str_op and param1 == "":
+                    st.warning("置換前の文字列を入力してください。")
+                else:
+                    try:
+                        def apply_str(target_df):
+                            if str_col not in target_df.columns:
+                                return target_df
+                            if "置換する" in str_op:
+                                s = target_df[str_col].astype("string")
+                                replaced = s.str.replace(param1, param2, regex=use_regex_rep)
+                                target_df[new_str_col] = replaced.astype("category")
                             else:
-                                target_df[new_str_col] = s.str[-n:].astype("category")
-                        elif "正規表現" in str_op:
-                            ext = s.str.extract(param1)[0]
-                            target_df[new_str_col] = ext.astype("category")
-                        return target_df
+                                s = target_df[str_col].astype(str)
+                                if "数値だけ" in str_op:
+                                    ext = s.str.extract(r"(-?\d+\.?\d*)")[0]
+                                    target_df[new_str_col] = pd.to_numeric(ext, errors="coerce").astype("float32")
+                                elif "含むかフラグ" in str_op:
+                                    target_df[new_str_col] = s.str.contains(param1, na=False, regex=False).astype("int8")
+                                elif "区切り文字" in str_op:
+                                    target_df[new_str_col] = s.str.split(param1).str.get(int(param2)).astype("category")
+                                elif "先頭または末尾" in str_op:
+                                    n = int(param2)
+                                    if param1 == "先頭から":
+                                        target_df[new_str_col] = s.str[:n].astype("category")
+                                    else:
+                                        target_df[new_str_col] = s.str[-n:].astype("category")
+                                elif "正規表現" in str_op:
+                                    ext = s.str.extract(param1)[0]
+                                    target_df[new_str_col] = ext.astype("category")
+                            return target_df
 
-                    st.session_state.train_df = apply_str(st.session_state.train_df)
-                    if st.session_state.test_df is not None:
-                        st.session_state.test_df = apply_str(st.session_state.test_df)
-                    notify_and_refresh(f"新しい列「{new_str_col}」を作成しました！（リアルタイム確認も更新済み）")
-                except Exception as e:
-                    st.error(f"処理中にエラーが発生しました: {e}")
+                        st.session_state.train_df = apply_str(st.session_state.train_df)
+                        if st.session_state.test_df is not None:
+                            st.session_state.test_df = apply_str(st.session_state.test_df)
+                        action_msg = f"列「{new_str_col}」を更新しました！" if overwrite_orig else f"新しい列「{new_str_col}」を作成しました！"
+                        notify_and_refresh(f"{action_msg}（リアルタイム確認も更新済み）")
+                    except Exception as e:
+                        st.error(f"処理中にエラーが発生しました: {e}")
 
         elif prep_mode == "4. 条件で抽出・出力":
             st.write("### 条件を指定して該当する行だけを抽出・出力")
