@@ -27,7 +27,8 @@ from sklearn.metrics import (
     roc_auc_score,
     accuracy_score,
     f1_score,
-    log_loss
+    log_loss,
+    confusion_matrix
 )
 
 st.set_page_config(page_title="Data Analysis & Competition App", layout="wide")
@@ -62,6 +63,47 @@ def get_all_datasets():
     for name, df_val in st.session_state.extra_dfs.items():
         datasets[name] = df_val
     return datasets
+
+# --- カラム自動分類関数 ---
+def classify_column(s: pd.Series) -> str:
+    n_len = len(s)
+    n_uniq = s.nunique(dropna=True)
+    col_lower = str(s.name).lower()
+
+    if n_uniq == 0:
+        return "全欠損"
+    if n_uniq == 1:
+        return "定数 (1種)"
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return "日付・時刻"
+    if pd.api.types.is_bool_dtype(s) or n_uniq == 2:
+        return "二値・フラグ"
+
+    # 文字列系で日付っぽいか簡易判定
+    if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s) or isinstance(s.dtype, pd.CategoricalDtype):
+        sample = s.dropna().astype(str).head(20)
+        if any(k in col_lower for k in ["date", "time", "day", "ymd", "日時", "日付"]):
+            try:
+                parsed = pd.to_datetime(sample, errors="coerce")
+                if parsed.notna().mean() > 0.8:
+                    return "日付・時刻(文字)"
+            except Exception:
+                pass
+        if n_len > 0 and n_uniq == n_len:
+            return "ID候補 (一意)"
+        if n_len > 0 and (n_uniq / n_len) > 0.5 and n_uniq > 50:
+            return "テキスト・高基数"
+        return "カテゴリ"
+
+    # 数値系
+    if pd.api.types.is_numeric_dtype(s):
+        if n_len > 0 and n_uniq == n_len and pd.api.types.is_integer_dtype(s):
+            return "ID候補 (連番等)"
+        if n_uniq <= 15 and pd.api.types.is_integer_dtype(s):
+            return "数値 (離散/カテゴリ的)"
+        return "数値 (連続)"
+
+    return "その他"
 
 def render_custom_save_ui(key_prefix):
     st.divider()
@@ -279,8 +321,8 @@ def encode_latlon_to_mesh(lat_s, lon_s, level=4):
     res.loc[valid] = codes
     return res
 
-# --- モデル生成関数（チューニングプリセット対応） ---
-def build_model(model_name, task_type, preset, seed):
+# --- モデル生成関数（回帰・二値分類・多クラス分類対応） ---
+def build_model(model_name, task_type, preset, seed, n_classes=2):
     if model_name in ["LightGBM", "時系列トレンド + LightGBM（ハイブリッド）"]:
         params = {
             "浅い（過学習防止）": dict(n_estimators=1000, learning_rate=0.05, max_depth=4, num_leaves=15, min_child_samples=30, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
@@ -288,8 +330,12 @@ def build_model(model_name, task_type, preset, seed):
             "深い（表現力重視）": dict(n_estimators=1000, learning_rate=0.05, max_depth=10, num_leaves=63, min_child_samples=10, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
             "高精度・じっくり（コンペ向け）": dict(n_estimators=2000, learning_rate=0.02, max_depth=7, num_leaves=31, min_child_samples=20, colsample_bytree=0.7, subsample=0.8, subsample_freq=1, reg_alpha=0.1, reg_lambda=1.0),
         }[preset]
-        cls = lgb.LGBMRegressor if task_type == "回帰" else lgb.LGBMClassifier
-        return cls(random_state=seed, n_jobs=-1, verbose=-1, **params)
+        if task_type == "回帰":
+            return lgb.LGBMRegressor(random_state=seed, n_jobs=-1, verbose=-1, **params)
+        elif task_type == "多クラス分類":
+            return lgb.LGBMClassifier(objective="multiclass", num_class=n_classes, random_state=seed, n_jobs=-1, verbose=-1, **params)
+        else:
+            return lgb.LGBMClassifier(random_state=seed, n_jobs=-1, verbose=-1, **params)
 
     elif model_name == "決定木 (DecisionTree)":
         params = {
@@ -565,13 +611,20 @@ with tab1:
         if st.session_state.train_df is not None:
             df_show = st.session_state.train_df
             st.divider()
-            st.write(f"### カラム概要（型・欠損・ユニーク数：{st.session_state.train_name}）")
+            st.write(f"### カラム概要・自動分類（{st.session_state.train_name}）")
             top_vals = []
+            col_cats = []
             for c in df_show.columns:
                 vc = df_show[c].value_counts(dropna=False).head(3)
                 top_vals.append(", ".join([f"{k}({v:,})" for k, v in vc.items()]))
+                col_cats.append(classify_column(df_show[c]))
+
+            # 自動分類の件数サマリー
+            cat_counts = pd.Series(col_cats).value_counts()
+            st.caption("カラム分類内訳: " + " | ".join([f"**{k}**: {v}列" for k, v in cat_counts.items()]))
 
             summary_df = pd.DataFrame({
+                "自動分類": col_cats,
                 "型": df_show.dtypes.astype(str),
                 "ユニーク数": df_show.nunique(),
                 "ユニーク率(%)": (df_show.nunique() / len(df_show) * 100).round(2),
@@ -895,7 +948,7 @@ with tab2:
                 st.warning("数値列が2つ以上必要です。")
 
 # ==========================================
-# TAB 3: 前処理（基本・日付分解・文字列抽出/置換・条件抽出・特定行削除）
+# TAB 3: 前処理
 # ==========================================
 with tab3:
     if st.session_state.train_df is None:
@@ -903,6 +956,7 @@ with tab3:
     else:
         df = st.session_state.train_df
         all_cols = df.columns.tolist()
+        num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
 
         prep_mode = st.radio(
             "前処理メニュー",
@@ -911,7 +965,8 @@ with tab3:
                 "2. 日付・時刻の分解",
                 "3. 文字列の抜き取り・置換",
                 "4. 条件で抽出・出力",
-                "5. 特定行の削除"
+                "5. 特定行の削除",
+                "6. カラムの分類・ビニング"
             ],
             horizontal=True
         )
@@ -1267,6 +1322,75 @@ with tab3:
                             st.session_state.test_df = new_df
                         notify_and_refresh(f"欠損行 {na_cnt:,}行を削除しました（残り {len(new_df):,}行）")
 
+        elif prep_mode == "6. カラムの分類・ビニング":
+            st.write("### 数値列の区間分類（ビニング）や型変換")
+            bin_op = st.radio("処理を選択", ["A. 数値列を区間で分類（ランク分け）", "B. カラムの型を変換（数値 / カテゴリ）"], horizontal=True)
+
+            if bin_op.startswith("A."):
+                if len(num_cols) == 0:
+                    st.warning("数値列がありません。")
+                else:
+                    bc1, bc2 = st.columns(2)
+                    b_col = bc1.selectbox("分類する数値列", num_cols, key="bin_col")
+                    b_method = bc2.selectbox("分類方法", ["等頻度で分割 (qcut: 件数が均等)", "等幅で分割 (cut: 値幅が均等)", "しきい値を自分で指定"], key="bin_method")
+
+                    if "自分で指定" in b_method:
+                        edges_text = st.text_input("区切りのしきい値をカンマ区切りで入力（例: 100, 500, 1000）", value="0, 100, 500", key="bin_edges")
+                        n_bins = None
+                    else:
+                        n_bins = st.slider("分類数（何段階に分けるか）", 2, 10, 4, key="bin_n")
+                        edges_text = ""
+
+                    new_bin_col = st.text_input("新しく作る列名", value=f"{b_col}_bin", key="bin_new_name")
+
+                    if st.button("数値列を分類（ビニング）する"):
+                        try:
+                            tr_s = st.session_state.train_df[b_col]
+                            if "自分で指定" in b_method:
+                                raw_edges = sorted([float(x.strip()) for x in edges_text.replace("、", ",").split(",") if x.strip()])
+                                bins_edges = [-np.inf] + raw_edges + [np.inf]
+                            elif "等頻度" in b_method:
+                                _, bins_edges = pd.qcut(tr_s, q=n_bins, retbins=True, duplicates="drop")
+                                bins_edges[0] = -np.inf
+                                bins_edges[-1] = np.inf
+                            else:
+                                _, bins_edges = pd.cut(tr_s, bins=n_bins, retbins=True)
+                                bins_edges[0] = -np.inf
+                                bins_edges[-1] = np.inf
+
+                            st.session_state.train_df[new_bin_col] = pd.cut(tr_s, bins=bins_edges).astype(str).astype("category")
+                            if st.session_state.test_df is not None and b_col in st.session_state.test_df.columns:
+                                st.session_state.test_df[new_bin_col] = pd.cut(st.session_state.test_df[b_col], bins=bins_edges).astype(str).astype("category")
+
+                            notify_and_refresh(f"「{b_col}」を分類して新しい列「{new_bin_col}」を作成しました！")
+                        except Exception as e:
+                            st.error(f"分類エラー: {e}")
+
+            else:
+                tc1, tc2 = st.columns(2)
+                conv_cols = tc1.multiselect("型を変換する列を選択", all_cols, key="conv_cols")
+                conv_type = tc2.selectbox("変換先の型", ["カテゴリ型 (category)", "数値型 (float32)", "文字列型 (string)"], key="conv_type")
+                if st.button("型変換を実行する"):
+                    if not conv_cols:
+                        st.warning("列を1つ以上選んでください。")
+                    else:
+                        def apply_conv(target_df):
+                            for c in conv_cols:
+                                if c not in target_df.columns:
+                                    continue
+                                if "カテゴリ" in conv_type:
+                                    target_df[c] = target_df[c].astype(str).astype("category")
+                                elif "数値" in conv_type:
+                                    target_df[c] = pd.to_numeric(target_df[c], errors="coerce").astype("float32")
+                                else:
+                                    target_df[c] = target_df[c].astype("string")
+                            return target_df
+
+                        st.session_state.train_df = apply_conv(st.session_state.train_df)
+                        if st.session_state.test_df is not None:
+                            st.session_state.test_df = apply_conv(st.session_state.test_df)
+                        notify_and_refresh(f"{len(conv_cols)}列を「{conv_type}」に変換しました！")
+
         render_custom_save_ui("tab3")
 
 # ==========================================
@@ -1538,7 +1662,7 @@ with tab4:
         render_custom_save_ui("tab4")
 
 # ==========================================
-# TAB 5: 機械学習・評価（ハイブリッドモデル・時系列グラフ対応）
+# TAB 5: 機械学習・評価（回帰・二値分類・多クラス分類対応）
 # ==========================================
 with tab5:
     if st.session_state.train_df is None:
@@ -1549,7 +1673,7 @@ with tab5:
 
         c1, c2, c3 = st.columns(3)
         target_col = c1.selectbox("目的変数 (Target)", all_cols, index=len(all_cols)-1)
-        task_type = c2.selectbox("タスク種別", ["回帰", "二値分類"])
+        task_type = c2.selectbox("タスク種別", ["回帰", "二値分類", "多クラス分類"])
 
         model_options = (
             [
@@ -1630,14 +1754,28 @@ with tab5:
                 work_df = work_df.reset_index(drop=True)
 
                 X = work_df[feature_cols].copy()
-                y = work_df[target_col].copy()
+                y_raw = work_df[target_col].copy()
+                class_labels = None
+                n_classes = 2
 
                 if task_type == "二値分類":
-                    if y.nunique() != 2:
-                        st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {y.nunique()} 個です。")
+                    if y_raw.nunique() != 2:
+                        st.error(f"「二値分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {y_raw.nunique()} 個です。3種類以上の場合は「多クラス分類」を選んでください。")
                         st.stop()
-                    if not pd.api.types.is_numeric_dtype(y):
-                        y = pd.Series(pd.factorize(y)[0])
+                    codes, uniques = pd.factorize(y_raw, sort=True)
+                    y = pd.Series(codes)
+                    class_labels = list(uniques)
+                    n_classes = 2
+                elif task_type == "多クラス分類":
+                    if y_raw.nunique() < 3:
+                        st.error(f"「多クラス分類」が選ばれていますが、目的変数 '{target_col}' のユニーク数が {y_raw.nunique()} 個です（3種類以上必要）。")
+                        st.stop()
+                    codes, uniques = pd.factorize(y_raw, sort=True)
+                    y = pd.Series(codes)
+                    class_labels = list(uniques)
+                    n_classes = len(class_labels)
+                else:
+                    y = y_raw
 
                 if use_log1p and (y < 0).any():
                     st.error("目的変数に負の値が含まれているため、log1p変換（RMSLE最適化）は使用できません。")
@@ -1668,7 +1806,7 @@ with tab5:
                     X_num, X_test_num = None, None
 
                 if "Hold-out" in cv_type:
-                    strat_arg = y if task_type == "二値分類" else None
+                    strat_arg = y if task_type in ["二値分類", "多クラス分類"] else None
                     tr_idx, va_idx = train_test_split(np.arange(len(work_df)), test_size=val_ratio, random_state=42, stratify=strat_arg)
                     splits = [(tr_idx, va_idx)]
                 elif "TimeSeriesSplit" in cv_type:
@@ -1705,8 +1843,13 @@ with tab5:
                 progress = st.progress(0)
 
                 for preset in presets_to_run:
-                    oof_preds = np.full(len(work_df), np.nan)
-                    test_preds = np.zeros(len(X_test)) if X_test is not None else None
+                    if task_type == "多クラス分類":
+                        oof_preds = np.full((len(work_df), n_classes), np.nan)
+                        test_preds_proba = np.zeros((len(X_test), n_classes)) if X_test is not None else None
+                    else:
+                        oof_preds = np.full(len(work_df), np.nan)
+                        test_preds_proba = np.zeros(len(X_test)) if X_test is not None else None
+
                     importances = np.zeros(len(feature_cols))
 
                     for fold, (tr_idx, va_idx) in enumerate(splits):
@@ -1738,12 +1881,12 @@ with tab5:
                                 t_pred = te_trend + lgb_model.predict(X_test)
                                 if use_log1p:
                                     t_pred = np.expm1(np.clip(t_pred, -10, 50))
-                                test_preds += t_pred / len(splits)
+                                test_preds_proba += t_pred / len(splits)
 
                             importances += lgb_model.feature_importances_ / len(splits)
 
                         else:
-                            model = build_model(model_name, task_type, preset, 42 + fold)
+                            model = build_model(model_name, task_type, preset, 42 + fold, n_classes=n_classes)
 
                             if model_name == "LightGBM":
                                 model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
@@ -1759,27 +1902,32 @@ with tab5:
                                     t_pred = model.predict(X_test)
                                     if use_log1p:
                                         t_pred = np.expm1(np.clip(t_pred, -10, 50))
-                                    test_preds += t_pred / len(splits)
-                            else:
+                                    test_preds_proba += t_pred / len(splits)
+                            elif task_type == "二値分類":
                                 oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
                                 if X_test is not None:
-                                    test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
+                                    test_preds_proba += model.predict_proba(X_test)[:, 1] / len(splits)
+                            else:
+                                oof_preds[va_idx] = model.predict_proba(X_va)
+                                if X_test is not None:
+                                    test_preds_proba += model.predict_proba(X_test) / len(splits)
 
                             if hasattr(model, "feature_importances_"):
                                 importances += model.feature_importances_ / len(splits)
                             elif hasattr(model, "named_steps"):
                                 est = list(model.named_steps.values())[-1]
-                                coef = np.abs(est.coef_).ravel()
-                                importances += coef / len(splits)
+                                coef = np.abs(est.coef_)
+                                if coef.ndim > 1:
+                                    coef = coef.mean(axis=0)
+                                importances += coef.ravel() / len(splits)
 
                         step_cnt += 1
                         progress.progress(step_cnt / total_steps)
 
-                    valid_mask = ~np.isnan(oof_preds)
-                    y_eval = y[valid_mask]
-                    p_eval = oof_preds[valid_mask]
-
                     if task_type == "回帰":
+                        valid_mask = ~np.isnan(oof_preds)
+                        y_eval = y[valid_mask]
+                        p_eval = oof_preds[valid_mask]
                         rmse = root_mean_squared_error(y_eval, p_eval)
                         mae = mean_absolute_error(y_eval, p_eval)
                         r2 = r2_score(y_eval, p_eval)
@@ -1787,9 +1935,12 @@ with tab5:
                         main_score = rmsle if (use_log1p and not np.isnan(rmsle)) else rmse
                         results.append({
                             "設定": preset, "RMSE": rmse, "MAE": mae, "R2": r2, "RMSLE": rmsle,
-                            "_key": main_score, "_oof": oof_preds, "_test_preds": test_preds, "_imp": importances
+                            "_key": main_score, "_oof": oof_preds, "_test_preds": test_preds_proba, "_imp": importances
                         })
-                    else:
+                    elif task_type == "二値分類":
+                        valid_mask = ~np.isnan(oof_preds)
+                        y_eval = y[valid_mask]
+                        p_eval = oof_preds[valid_mask]
                         auc = roc_auc_score(y_eval, p_eval)
                         pred_cls = (p_eval >= 0.5).astype(int)
                         acc = accuracy_score(y_eval, pred_cls)
@@ -1797,14 +1948,36 @@ with tab5:
                         ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15))
                         results.append({
                             "設定": preset, "ROC-AUC": auc, "Accuracy": acc, "F1": f1, "LogLoss": ll,
-                            "_key": -auc, "_oof": oof_preds, "_test_preds": test_preds, "_imp": importances
+                            "_key": -auc, "_oof": oof_preds, "_oof_cls": pred_cls, "_valid_mask": valid_mask,
+                            "_test_preds": test_preds_proba, "_imp": importances
+                        })
+                    else:
+                        valid_mask = ~np.isnan(oof_preds[:, 0])
+                        y_eval = y[valid_mask]
+                        p_eval = oof_preds[valid_mask]
+                        pred_cls = np.argmax(p_eval, axis=1)
+                        acc = accuracy_score(y_eval, pred_cls)
+                        f1_mac = f1_score(y_eval, pred_cls, average="macro", zero_division=0)
+                        f1_w = f1_score(y_eval, pred_cls, average="weighted", zero_division=0)
+                        ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15), labels=list(range(n_classes)))
+                        # テスト予測は元のクラスラベルへ戻す
+                        final_test_preds = np.array([class_labels[i] for i in np.argmax(test_preds_proba, axis=1)]) if test_preds_proba is not None else None
+                        results.append({
+                            "設定": preset, "Accuracy": acc, "Macro F1": f1_mac, "Weighted F1": f1_w, "LogLoss": ll,
+                            "_key": -f1_mac, "_oof": pred_cls, "_oof_cls": pred_cls, "_valid_mask": valid_mask,
+                            "_test_preds": final_test_preds, "_imp": importances
                         })
 
                 best_res = min(results, key=lambda x: x["_key"])
 
                 if len(results) > 1:
                     st.write("### 🏆 チューニングパターン一括比較")
-                    comp_cols = ["設定", "RMSE", "MAE", "R2", "RMSLE"] if task_type == "回帰" else ["設定", "ROC-AUC", "Accuracy", "F1", "LogLoss"]
+                    if task_type == "回帰":
+                        comp_cols = ["設定", "RMSE", "MAE", "R2", "RMSLE"]
+                    elif task_type == "二値分類":
+                        comp_cols = ["設定", "ROC-AUC", "Accuracy", "F1", "LogLoss"]
+                    else:
+                        comp_cols = ["設定", "Accuracy", "Macro F1", "Weighted F1", "LogLoss"]
                     comp_df = pd.DataFrame([{k: r[k] for k in comp_cols} for r in results])
                     st.dataframe(comp_df, use_container_width=True)
                     st.success(f"最良パターン: **{best_res['設定']}** の予測結果を採用しました！")
@@ -1822,40 +1995,59 @@ with tab5:
                     m2.metric("MAE（低いほど良い）", f"{best_res['MAE']:.5f}")
                     m3.metric("R²（1に近いほど良い）", f"{best_res['R2']:.5f}")
                     m4.metric("RMSLE（低いほど良い）", f"{best_res['RMSLE']:.5f}" if not np.isnan(best_res["RMSLE"]) else "算出不可")
+
+                    # 回帰：時系列推移グラフ（実測値 vs 予測値）
+                    st.write(f"### 📉 目的変数「{target_col}」の時系列推移（実測値 vs 予測値）")
+                    best_oof = best_res["_oof"]
+                    valid_mask = ~np.isnan(best_oof)
+                    ts_plot_df = pd.DataFrame({"実測値": y[valid_mask].values, "予測値": best_oof[valid_mask]})
+                    if time_axis_col != "行順（インデックス）":
+                        ts_plot_df[time_axis_col] = work_df.loc[valid_mask, time_axis_col].values
+                        ts_plot_df = ts_plot_df.sort_values(time_axis_col)
+                        x_axis_name = time_axis_col
+                    else:
+                        ts_plot_df["行番号"] = np.arange(len(ts_plot_df))
+                        x_axis_name = "行番号"
+
+                    if len(ts_plot_df) > 5000:
+                        step = max(1, len(ts_plot_df) // 5000)
+                        ts_plot_df = ts_plot_df.iloc[::step]
+                        st.caption("※描画軽量化のため約5,000点に間引いて表示しています")
+
+                    fig_ts = go.Figure()
+                    fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["実測値"], mode="lines", name="実測値", line=dict(color="#1f77b4", width=1.5)))
+                    fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["予測値"], mode="lines", name="予測値", line=dict(color="#ff7f0e", width=1.5, dash="dot")))
+                    fig_ts.update_layout(title=f"{x_axis_name} ごとの {target_col}（実測 vs 予測）", xaxis_title=x_axis_name, yaxis_title=target_col, hovermode="x unified")
+                    st.plotly_chart(fig_ts, use_container_width=True)
+
                 else:
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("ROC-AUC（高いほど良い）", f"{best_res['ROC-AUC']:.5f}")
-                    m2.metric("Accuracy", f"{best_res['Accuracy']:.5f}")
-                    m3.metric("F1 Score", f"{best_res['F1']:.5f}")
-                    m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
+                    if task_type == "二値分類":
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("ROC-AUC（高いほど良い）", f"{best_res['ROC-AUC']:.5f}")
+                        m2.metric("Accuracy", f"{best_res['Accuracy']:.5f}")
+                        m3.metric("F1 Score", f"{best_res['F1']:.5f}")
+                        m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
+                    else:
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Accuracy（高いほど良い）", f"{best_res['Accuracy']:.5f}")
+                        m2.metric("Macro F1（高いほど良い）", f"{best_res['Macro F1']:.5f}")
+                        m3.metric("Weighted F1", f"{best_res['Weighted F1']:.5f}")
+                        m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
 
-                # --- 目的変数に対する時系列グラフ（実測値 vs 予測値） ---
-                st.write(f"### 📉 目的変数「{target_col}」の時系列推移（実測値 vs 予測値）")
-                best_oof = best_res["_oof"]
-                valid_mask = ~np.isnan(best_oof)
-
-                ts_plot_df = pd.DataFrame({
-                    "実測値": y[valid_mask].values,
-                    "予測値": best_oof[valid_mask]
-                })
-                if time_axis_col != "行順（インデックス）":
-                    ts_plot_df[time_axis_col] = work_df.loc[valid_mask, time_axis_col].values
-                    ts_plot_df = ts_plot_df.sort_values(time_axis_col)
-                    x_axis_name = time_axis_col
-                else:
-                    ts_plot_df["行番号"] = np.arange(len(ts_plot_df))
-                    x_axis_name = "行番号"
-
-                if len(ts_plot_df) > 5000:
-                    step = max(1, len(ts_plot_df) // 5000)
-                    ts_plot_df = ts_plot_df.iloc[::step]
-                    st.caption("※描画軽量化のため約5,000点に間引いて表示しています")
-
-                fig_ts = go.Figure()
-                fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["実測値"], mode="lines", name="実測値", line=dict(color="#1f77b4", width=1.5)))
-                fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["予測値"], mode="lines", name="予測値", line=dict(color="#ff7f0e", width=1.5, dash="dot")))
-                fig_ts.update_layout(title=f"{x_axis_name} ごとの {target_col}（実測 vs 予測）", xaxis_title=x_axis_name, yaxis_title=target_col, hovermode="x unified")
-                st.plotly_chart(fig_ts, use_container_width=True)
+                    # 分類：混同行列ヒートマップ
+                    st.write("### 🧮 混同行列 (Confusion Matrix)")
+                    cm = confusion_matrix(y[best_res["_valid_mask"]], best_res["_oof_cls"], labels=list(range(n_classes)))
+                    lbl_strs = [str(l) for l in class_labels]
+                    fig_cm = px.imshow(
+                        cm,
+                        x=lbl_strs,
+                        y=lbl_strs,
+                        text_auto=True,
+                        color_continuous_scale="Blues",
+                        labels=dict(x="予測クラス", y="正解クラス", color="件数"),
+                        title="混同行列（対角線が多いほど高精度）"
+                    )
+                    st.plotly_chart(fig_cm, use_container_width=True)
 
                 # --- 特徴量重要度 ---
                 imp_title = f"特徴量重要度 Top 20 ({best_res['設定']})" if model_name != "線形モデル (Ridge / Logistic)" else f"回帰係数の絶対値 Top 20 ({best_res['設定']})"
@@ -1886,20 +2078,22 @@ with tab6:
         st.info("コンペ用モードでTestデータを読み込み、タブ5で学習を実行すると、ここで提出ファイルを作成できます。")
     else:
         preds = st.session_state.test_preds.copy()
+        is_num_preds = np.issubdtype(np.asarray(preds).dtype, np.number)
 
-        st.write("#### 1. 予測値の後処理（任意）")
-        p1, p2, p3 = st.columns(3)
-        clip_zero = p1.checkbox("0未満を0にクリップ", value=False)
-        round_int = p2.checkbox("四捨五入して整数化", value=False)
-        binarize = p3.checkbox("しきい値で 0/1 に変換（分類用）", value=False)
+        if is_num_preds and st.session_state.last_task_type != "多クラス分類":
+            st.write("#### 1. 予測値の後処理（任意）")
+            p1, p2, p3 = st.columns(3)
+            clip_zero = p1.checkbox("0未満を0にクリップ", value=False)
+            round_int = p2.checkbox("四捨五入して整数化", value=False)
+            binarize = p3.checkbox("しきい値で 0/1 に変換（二値分類用）", value=False)
 
-        if clip_zero:
-            preds = np.clip(preds, 0, None)
-        if binarize:
-            th = st.slider("0/1 変換のしきい値", 0.0, 1.0, 0.5, 0.01)
-            preds = (preds >= th).astype(int)
-        elif round_int:
-            preds = np.rint(preds).astype(int)
+            if clip_zero:
+                preds = np.clip(preds, 0, None)
+            if binarize:
+                th = st.slider("0/1 変換のしきい値", 0.0, 1.0, 0.5, 0.01)
+                preds = (preds >= th).astype(int)
+            elif round_int:
+                preds = np.rint(preds).astype(int)
 
         st.write("#### 2. フォーマット設定")
         if st.session_state.sub_template_df is not None:
@@ -1938,8 +2132,12 @@ with tab6:
         chk1, chk2, chk3, chk4 = st.columns(4)
         chk1.metric("行数", f"{len(sub_df):,}")
         chk2.metric("欠損数", f"{sub_df.isnull().sum().sum():,}")
-        chk3.metric("最小値", f"{np.nanmin(preds):.4f}")
-        chk4.metric("最大値", f"{np.nanmax(preds):.4f}")
+        if is_num_preds:
+            chk3.metric("最小値", f"{np.nanmin(preds):.4f}")
+            chk4.metric("最大値", f"{np.nanmax(preds):.4f}")
+        else:
+            chk3.metric("予測クラス数", f"{pd.Series(preds).nunique():,}")
+            chk4.metric("最頻クラス", f"{pd.Series(preds).mode().iloc[0]}")
 
         st.dataframe(sub_df.head(5), use_container_width=True)
 
