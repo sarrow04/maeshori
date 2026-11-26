@@ -79,7 +79,6 @@ def classify_column(s: pd.Series) -> str:
     if pd.api.types.is_bool_dtype(s) or n_uniq == 2:
         return "二値・フラグ"
 
-    # 文字列系で日付っぽいか簡易判定
     if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s) or isinstance(s.dtype, pd.CategoricalDtype):
         sample = s.dropna().astype(str).head(20)
         if any(k in col_lower for k in ["date", "time", "day", "ymd", "日時", "日付"]):
@@ -95,7 +94,6 @@ def classify_column(s: pd.Series) -> str:
             return "テキスト・高基数"
         return "カテゴリ"
 
-    # 数値系
     if pd.api.types.is_numeric_dtype(s):
         if n_len > 0 and n_uniq == n_len and pd.api.types.is_integer_dtype(s):
             return "ID候補 (連番等)"
@@ -322,7 +320,7 @@ def encode_latlon_to_mesh(lat_s, lon_s, level=4):
     return res
 
 # --- モデル生成関数（回帰・二値分類・多クラス分類対応） ---
-def build_model(model_name, task_type, preset, seed, n_classes=2):
+def build_model(model_name, task_type, preset, seed):
     if model_name in ["LightGBM", "時系列トレンド + LightGBM（ハイブリッド）"]:
         params = {
             "浅い（過学習防止）": dict(n_estimators=1000, learning_rate=0.05, max_depth=4, num_leaves=15, min_child_samples=30, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
@@ -332,9 +330,8 @@ def build_model(model_name, task_type, preset, seed, n_classes=2):
         }[preset]
         if task_type == "回帰":
             return lgb.LGBMRegressor(random_state=seed, n_jobs=-1, verbose=-1, **params)
-        elif task_type == "多クラス分類":
-            return lgb.LGBMClassifier(objective="multiclass", num_class=n_classes, random_state=seed, n_jobs=-1, verbose=-1, **params)
         else:
+            # 多クラスでもfoldごとのクラス数に合わせて自動判定させる
             return lgb.LGBMClassifier(random_state=seed, n_jobs=-1, verbose=-1, **params)
 
     elif model_name == "決定木 (DecisionTree)":
@@ -381,6 +378,15 @@ def make_numeric_matrix(df_tr, df_te=None):
         if X_te_num is not None:
             X_te_num[col] = X_te_num[col].fillna(med)
     return X_num, X_te_num
+
+def align_multiclass_proba(raw_proba, model_classes, n_classes):
+    """fold内で一部クラスが欠けていても全クラス数 (n_classes) の列に確率を揃える"""
+    full = np.zeros((len(raw_proba), n_classes), dtype=np.float64)
+    for idx_c, cls_id in enumerate(model_classes):
+        c_int = int(cls_id)
+        if 0 <= c_int < n_classes:
+            full[:, c_int] = raw_proba[:, idx_c]
+    return full
 
 # --- セッション状態の初期化 ---
 for key, default_val in [
@@ -1321,8 +1327,16 @@ with tab3:
                         notify_and_refresh(f"欠損行 {na_cnt:,}行を削除しました（残り {len(new_df):,}行）")
 
         elif prep_mode == "6. カラムの分類・ビニング":
-            st.write("### 数値列の区間分類（ビニング）や型変換")
-            bin_op = st.radio("処理を選択", ["A. 数値列を区間で分類（ランク分け）", "B. カラムの型を変換（数値 / カテゴリ）"], horizontal=True)
+            st.write("### 数値列の区間分類・型変換・レア値の統合")
+            bin_op = st.radio(
+                "処理を選択",
+                [
+                    "A. 数値列を区間で分類（ランク分け）",
+                    "B. カラムの型を変換（数値 / カテゴリ）",
+                    "C. レアな値を「その他」にまとめる（多クラス分類向け）"
+                ],
+                horizontal=True
+            )
 
             if bin_op.startswith("A."):
                 if len(num_cols) == 0:
@@ -1364,7 +1378,7 @@ with tab3:
                         except Exception as e:
                             st.error(f"分類エラー: {e}")
 
-            else:
+            elif bin_op.startswith("B."):
                 tc1, tc2 = st.columns(2)
                 conv_cols = tc1.multiselect("型を変換する列を選択", all_cols, key="conv_cols")
                 conv_type = tc2.selectbox("変換先の型", ["カテゴリ型 (category)", "数値型 (float32)", "文字列型 (string)"], key="conv_type")
@@ -1388,6 +1402,44 @@ with tab3:
                         if st.session_state.test_df is not None:
                             st.session_state.test_df = apply_conv(st.session_state.test_df)
                         notify_and_refresh(f"{len(conv_cols)}列を「{conv_type}」に変換しました！")
+
+            else:
+                rc1, rc2 = st.columns(2)
+                rare_col = rc1.selectbox("対象の列を選択（例: name）", all_cols, key="rare_col")
+                rare_mode = rc2.selectbox("まとめ方", ["出現回数がN回未満をまとめる", "出現数上位K個以外をまとめる"], key="rare_mode")
+
+                vc = df[rare_col].dropna().astype(str).value_counts()
+                rc3, rc4 = st.columns(2)
+                if "N回未満" in rare_mode:
+                    min_cnt = rc3.number_input("残す最小出現回数 (N)", min_value=2, max_value=10000, value=5, step=1, key="rare_min_cnt")
+                    keep_vals = set(vc[vc >= min_cnt].index)
+                else:
+                    top_k = rc3.number_input("残す上位カテゴリ数 (K)", min_value=2, max_value=max(2, len(vc)), value=min(10, max(2, len(vc))), step=1, key="rare_top_k")
+                    keep_vals = set(vc.head(int(top_k)).index)
+
+                other_label = rc4.text_input("まとめた後の名前", value="その他", key="rare_other_label")
+
+                rc5, rc6 = st.columns(2)
+                rare_overwrite = rc5.checkbox("元の列に上書きする", value=True, key="rare_overwrite")
+                rare_new_col = rare_col if rare_overwrite else rc6.text_input("新しく作る列名", value=f"{rare_col}_grouped", key="rare_new_col")
+
+                n_rare_types = len(vc) - len(keep_vals)
+                n_rare_rows = int(df[rare_col].dropna().astype(str).isin(keep_vals).eq(False).sum())
+                st.caption(f"現在 **{len(vc):,}種類** → 統合後 **{len(keep_vals) + (1 if n_rare_types > 0 else 0):,}種類**（{n_rare_types:,}種類 / {n_rare_rows:,}行が「{other_label}」になります）")
+
+                if st.button("レアな値をまとめる"):
+                    def apply_rare(target_df):
+                        if rare_col not in target_df.columns:
+                            return target_df
+                        s = target_df[rare_col].astype("string")
+                        grouped = s.where(s.isna() | s.isin(keep_vals), other_label)
+                        target_df[rare_new_col] = grouped.astype("category")
+                        return target_df
+
+                    st.session_state.train_df = apply_rare(st.session_state.train_df)
+                    if st.session_state.test_df is not None:
+                        st.session_state.test_df = apply_rare(st.session_state.test_df)
+                    notify_and_refresh(f"「{rare_col}」のレア値（{n_rare_types:,}種類）を「{other_label}」にまとめました！")
 
         render_custom_save_ui("tab3")
 
@@ -1804,7 +1856,7 @@ with tab5:
                     X_num, X_test_num = None, None
 
                 if "Hold-out" in cv_type:
-                    strat_arg = y if task_type in ["二値分類", "多クラス分類"] else None
+                    strat_arg = y if (task_type in ["二値分類", "多クラス分類"] and y.value_counts().min() >= 2) else None
                     tr_idx, va_idx = train_test_split(np.arange(len(work_df)), test_size=val_ratio, random_state=42, stratify=strat_arg)
                     splits = [(tr_idx, va_idx)]
                 elif "TimeSeriesSplit" in cv_type:
@@ -1823,8 +1875,13 @@ with tab5:
                         splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
                         splits = list(splitter.split(X, y_bins))
                     else:
-                        splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-                        splits = list(splitter.split(X, y))
+                        if y.value_counts().min() < n_splits:
+                            st.warning(f"出現回数が {n_splits} 回未満のクラスがあるため、StratifiedKFold の代わりに KFold で分割します。")
+                            splitter = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                            splits = list(splitter.split(X))
+                        else:
+                            splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                            splits = list(splitter.split(X, y))
                 else:
                     splitter = KFold(n_splits=n_splits, shuffle=True, random_state=42)
                     splits = list(splitter.split(X))
@@ -1884,10 +1941,23 @@ with tab5:
                             importances += lgb_model.feature_importances_ / len(splits)
 
                         else:
-                            model = build_model(model_name, task_type, preset, 42 + fold, n_classes=n_classes)
+                            model = build_model(model_name, task_type, preset, 42 + fold)
 
                             if model_name == "LightGBM":
-                                model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
+                                if task_type in ["二値分類", "多クラス分類"]:
+                                    # 学習側に存在しないラベルが検証側に混ざっていても落ちないようにフィルタ
+                                    tr_classes_set = set(y_tr_fit.unique())
+                                    va_seen_mask = y_va_fit.isin(tr_classes_set)
+                                    if va_seen_mask.any():
+                                        model.fit(
+                                            X_tr, y_tr_fit,
+                                            eval_set=[(X_va[va_seen_mask], y_va_fit[va_seen_mask])],
+                                            callbacks=[lgb.early_stopping(50, verbose=False)]
+                                        )
+                                    else:
+                                        model.fit(X_tr, y_tr_fit)
+                                else:
+                                    model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
                             else:
                                 model.fit(X_tr, y_tr_fit)
 
@@ -1906,9 +1976,12 @@ with tab5:
                                 if X_test is not None:
                                     test_preds_proba += model.predict_proba(X_test)[:, 1] / len(splits)
                             else:
-                                oof_preds[va_idx] = model.predict_proba(X_va)
+                                # 予測確率を全クラス数 (n_classes) に安全にマッピング
+                                raw_va_proba = model.predict_proba(X_va)
+                                oof_preds[va_idx] = align_multiclass_proba(raw_va_proba, model.classes_, n_classes)
                                 if X_test is not None:
-                                    test_preds_proba += model.predict_proba(X_test) / len(splits)
+                                    raw_te_proba = model.predict_proba(X_test)
+                                    test_preds_proba += align_multiclass_proba(raw_te_proba, model.classes_, n_classes) / len(splits)
 
                             if hasattr(model, "feature_importances_"):
                                 importances += model.feature_importances_ / len(splits)
@@ -1957,7 +2030,9 @@ with tab5:
                         acc = accuracy_score(y_eval, pred_cls)
                         f1_mac = f1_score(y_eval, pred_cls, average="macro", zero_division=0)
                         f1_w = f1_score(y_eval, pred_cls, average="weighted", zero_division=0)
-                        ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15), labels=list(range(n_classes)))
+                        p_norm = np.clip(p_eval, 1e-15, 1.0)
+                        p_norm = p_norm / p_norm.sum(axis=1, keepdims=True)
+                        ll = log_loss(y_eval, p_norm, labels=list(range(n_classes)))
                         final_test_preds = np.array([class_labels[i] for i in np.argmax(test_preds_proba, axis=1)]) if test_preds_proba is not None else None
                         results.append({
                             "設定": preset, "Accuracy": acc, "Macro F1": f1_mac, "Weighted F1": f1_w, "LogLoss": ll,
@@ -2031,8 +2106,17 @@ with tab5:
                         m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
 
                     st.write("### 🧮 混同行列 (Confusion Matrix)")
-                    cm = confusion_matrix(y[best_res["_valid_mask"]], best_res["_oof_cls"], labels=list(range(n_classes)))
-                    lbl_strs = [str(l) for l in class_labels]
+                    y_true_cm = y[best_res["_valid_mask"]]
+                    y_pred_cm = best_res["_oof_cls"]
+                    if n_classes > 25:
+                        top_ids = y_true_cm.value_counts().head(20).index.tolist()
+                        st.caption(f"※クラス数が多いため（{n_classes}種類）、出現数上位20クラスの混同行列を表示しています")
+                        cm = confusion_matrix(y_true_cm, y_pred_cm, labels=top_ids)
+                        lbl_strs = [str(class_labels[i]) for i in top_ids]
+                    else:
+                        cm = confusion_matrix(y_true_cm, y_pred_cm, labels=list(range(n_classes)))
+                        lbl_strs = [str(l) for l in class_labels]
+
                     fig_cm = px.imshow(
                         cm,
                         x=lbl_strs,
