@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import lightgbm as lgb
 from sklearn.model_selection import (
     KFold,
@@ -280,7 +281,7 @@ def encode_latlon_to_mesh(lat_s, lon_s, level=4):
 
 # --- モデル生成関数（チューニングプリセット対応） ---
 def build_model(model_name, task_type, preset, seed):
-    if model_name == "LightGBM":
+    if model_name in ["LightGBM", "時系列トレンド + LightGBM（ハイブリッド）"]:
         params = {
             "浅い（過学習防止）": dict(n_estimators=1000, learning_rate=0.05, max_depth=4, num_leaves=15, min_child_samples=30, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
             "標準（バランス）": dict(n_estimators=1000, learning_rate=0.05, max_depth=-1, num_leaves=31, min_child_samples=20, colsample_bytree=0.8, subsample=0.8, subsample_freq=1),
@@ -317,6 +318,23 @@ def build_model(model_name, task_type, preset, seed):
         else:
             c_val = {"浅い（過学習防止）": 0.1, "標準（バランス）": 1.0, "深い（表現力重視）": 10.0, "高精度・じっくり（コンペ向け）": 2.0}[preset]
             return make_pipeline(StandardScaler(), LogisticRegression(C=c_val, max_iter=1000))
+
+def make_numeric_matrix(df_tr, df_te=None):
+    """線形モデル・トレンドモデル用に数値化＆欠損補完を行う"""
+    X_num = df_tr.copy()
+    X_te_num = df_te.copy() if df_te is not None else None
+    for col in X_num.columns:
+        if not pd.api.types.is_numeric_dtype(X_num[col]):
+            cat_type = X_num[col].astype("category")
+            X_num[col] = cat_type.cat.codes
+            if X_te_num is not None:
+                X_te_num[col] = pd.Categorical(X_te_num[col], categories=cat_type.cat.categories).codes
+        med = X_num[col].median()
+        med = 0 if pd.isna(med) else med
+        X_num[col] = X_num[col].fillna(med)
+        if X_te_num is not None:
+            X_te_num[col] = X_te_num[col].fillna(med)
+    return X_num, X_te_num
 
 # --- セッション状態の初期化 ---
 for key, default_val in [
@@ -1430,7 +1448,7 @@ with tab4:
         render_custom_save_ui("tab4")
 
 # ==========================================
-# TAB 5: 機械学習・評価（分割方法指定・チューニング対応）
+# TAB 5: 機械学習・評価（ハイブリッドモデル・時系列グラフ対応）
 # ==========================================
 with tab5:
     if st.session_state.train_df is None:
@@ -1442,10 +1460,24 @@ with tab5:
         c1, c2, c3 = st.columns(3)
         target_col = c1.selectbox("目的変数 (Target)", all_cols, index=len(all_cols)-1)
         task_type = c2.selectbox("タスク種別", ["回帰", "二値分類"])
-        model_name = c3.selectbox(
-            "使用モデル",
-            ["LightGBM", "決定木 (DecisionTree)", "ランダムフォレスト (RandomForest)", "線形モデル (Ridge / Logistic)"]
+
+        model_options = (
+            [
+                "LightGBM",
+                "時系列トレンド + LightGBM（ハイブリッド）",
+                "決定木 (DecisionTree)",
+                "ランダムフォレスト (RandomForest)",
+                "線形モデル (Ridge / Logistic)"
+            ]
+            if task_type == "回帰"
+            else [
+                "LightGBM",
+                "決定木 (DecisionTree)",
+                "ランダムフォレスト (RandomForest)",
+                "線形モデル (Ridge / Logistic)"
+            ]
         )
+        model_name = c3.selectbox("使用モデル", model_options)
 
         tune_preset = st.selectbox(
             "チューニング設定（浅い・深いなど）",
@@ -1486,12 +1518,16 @@ with tab5:
             use_log1p = False
             c6.write("")
 
-        ts_cv_sort_col = None
+        # 時系列グラフ・時系列CV用の時間軸列
+        tc1, tc2 = st.columns(2)
+        time_axis_col = tc1.selectbox(
+            "時系列グラフ用の時間軸列（日付・時刻など）",
+            ["行順（インデックス）"] + all_cols,
+            key="ml_time_axis"
+        )
         group_cv_col = None
-        if "TimeSeriesSplit" in cv_type:
-            ts_cv_sort_col = st.selectbox("時系列分割用の並び替え列（日付・時刻など）", ["並び替えない（現在の行順）"] + all_cols)
-        elif "GroupKFold" in cv_type:
-            group_cv_col = st.selectbox("グループ分割のキー列（ID・メッシュ・店舗など）", all_cols)
+        if "GroupKFold" in cv_type:
+            group_cv_col = tc2.selectbox("グループ分割のキー列（ID・メッシュ・店舗など）", all_cols)
 
         if st.button("🚀 学習・CV評価を実行"):
             if not feature_cols:
@@ -1500,8 +1536,8 @@ with tab5:
 
             try:
                 work_df = df.dropna(subset=[target_col]).copy()
-                if "TimeSeriesSplit" in cv_type and ts_cv_sort_col and ts_cv_sort_col != "並び替えない（現在の行順）":
-                    work_df = work_df.sort_values(ts_cv_sort_col)
+                if "TimeSeriesSplit" in cv_type and time_axis_col != "行順（インデックス）":
+                    work_df = work_df.sort_values(time_axis_col)
                 work_df = work_df.reset_index(drop=True)
 
                 X = work_df[feature_cols].copy()
@@ -1527,23 +1563,21 @@ with tab5:
                 else:
                     X_test = None
 
-                if model_name == "LightGBM":
+                is_hybrid = (model_name == "時系列トレンド + LightGBM（ハイブリッド）")
+
+                # モデル別の前処理
+                if model_name == "LightGBM" or is_hybrid:
                     for col in X.select_dtypes(include=["object", "string"]).columns:
                         X[col] = X[col].astype("category")
                         if X_test is not None:
                             X_test[col] = X_test[col].astype("category")
+                    if is_hybrid:
+                        X_num, X_test_num = make_numeric_matrix(X, X_test)
+                    else:
+                        X_num, X_test_num = None, None
                 else:
-                    for col in X.columns:
-                        if not pd.api.types.is_numeric_dtype(X[col]):
-                            cat_type = X[col].astype("category")
-                            X[col] = cat_type.cat.codes
-                            if X_test is not None:
-                                X_test[col] = pd.Categorical(X_test[col], categories=cat_type.cat.categories).codes
-                        med = X[col].median()
-                        med = 0 if pd.isna(med) else med
-                        X[col] = X[col].fillna(med)
-                        if X_test is not None:
-                            X_test[col] = X_test[col].fillna(med)
+                    X, X_test = make_numeric_matrix(X, X_test)
+                    X_num, X_test_num = None, None
 
                 if "Hold-out" in cv_type:
                     strat_arg = y if task_type == "二値分類" else None
@@ -1594,34 +1628,63 @@ with tab5:
                         y_tr_fit = np.log1p(y_tr) if use_log1p else y_tr
                         y_va_fit = np.log1p(y_va) if use_log1p else y_va
 
-                        model = build_model(model_name, task_type, preset, 42 + fold)
+                        if is_hybrid:
+                            # 1段階目：線形モデルで全体トレンドを学習
+                            trend_model = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
+                            trend_model.fit(X_num.iloc[tr_idx], y_tr_fit)
+                            tr_trend = trend_model.predict(X_num.iloc[tr_idx])
+                            va_trend = trend_model.predict(X_num.iloc[va_idx])
 
-                        if model_name == "LightGBM":
-                            model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
-                        else:
-                            model.fit(X_tr, y_tr_fit)
-
-                        if task_type == "回帰":
-                            va_pred = model.predict(X_va)
+                            # 2段階目：残差（実測 - トレンド）をLightGBMで学習
+                            lgb_model = build_model("LightGBM", "回帰", preset, 42 + fold)
+                            lgb_model.fit(
+                                X_tr, y_tr_fit - tr_trend,
+                                eval_set=[(X_va, y_va_fit - va_trend)],
+                                callbacks=[lgb.early_stopping(50, verbose=False)]
+                            )
+                            va_pred = va_trend + lgb_model.predict(X_va)
                             if use_log1p:
                                 va_pred = np.expm1(np.clip(va_pred, -10, 50))
                             oof_preds[va_idx] = va_pred
+
                             if X_test is not None:
-                                t_pred = model.predict(X_test)
+                                te_trend = trend_model.predict(X_test_num)
+                                t_pred = te_trend + lgb_model.predict(X_test)
                                 if use_log1p:
                                     t_pred = np.expm1(np.clip(t_pred, -10, 50))
                                 test_preds += t_pred / len(splits)
-                        else:
-                            oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
-                            if X_test is not None:
-                                test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
 
-                        if hasattr(model, "feature_importances_"):
-                            importances += model.feature_importances_ / len(splits)
-                        elif hasattr(model, "named_steps"):
-                            est = list(model.named_steps.values())[-1]
-                            coef = np.abs(est.coef_).ravel()
-                            importances += coef / len(splits)
+                            importances += lgb_model.feature_importances_ / len(splits)
+
+                        else:
+                            model = build_model(model_name, task_type, preset, 42 + fold)
+
+                            if model_name == "LightGBM":
+                                model.fit(X_tr, y_tr_fit, eval_set=[(X_va, y_va_fit)], callbacks=[lgb.early_stopping(50, verbose=False)])
+                            else:
+                                model.fit(X_tr, y_tr_fit)
+
+                            if task_type == "回帰":
+                                va_pred = model.predict(X_va)
+                                if use_log1p:
+                                    va_pred = np.expm1(np.clip(va_pred, -10, 50))
+                                oof_preds[va_idx] = va_pred
+                                if X_test is not None:
+                                    t_pred = model.predict(X_test)
+                                    if use_log1p:
+                                        t_pred = np.expm1(np.clip(t_pred, -10, 50))
+                                    test_preds += t_pred / len(splits)
+                            else:
+                                oof_preds[va_idx] = model.predict_proba(X_va)[:, 1]
+                                if X_test is not None:
+                                    test_preds += model.predict_proba(X_test)[:, 1] / len(splits)
+
+                            if hasattr(model, "feature_importances_"):
+                                importances += model.feature_importances_ / len(splits)
+                            elif hasattr(model, "named_steps"):
+                                est = list(model.named_steps.values())[-1]
+                                coef = np.abs(est.coef_).ravel()
+                                importances += coef / len(splits)
 
                         step_cnt += 1
                         progress.progress(step_cnt / total_steps)
@@ -1638,7 +1701,7 @@ with tab5:
                         main_score = rmsle if (use_log1p and not np.isnan(rmsle)) else rmse
                         results.append({
                             "設定": preset, "RMSE": rmse, "MAE": mae, "R2": r2, "RMSLE": rmsle,
-                            "_key": main_score, "_test_preds": test_preds, "_imp": importances
+                            "_key": main_score, "_oof": oof_preds, "_test_preds": test_preds, "_imp": importances
                         })
                     else:
                         auc = roc_auc_score(y_eval, p_eval)
@@ -1648,7 +1711,7 @@ with tab5:
                         ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15))
                         results.append({
                             "設定": preset, "ROC-AUC": auc, "Accuracy": acc, "F1": f1, "LogLoss": ll,
-                            "_key": -auc, "_test_preds": test_preds, "_imp": importances
+                            "_key": -auc, "_oof": oof_preds, "_test_preds": test_preds, "_imp": importances
                         })
 
                 best_res = min(results, key=lambda x: x["_key"])
@@ -1662,7 +1725,8 @@ with tab5:
 
                 if best_res["_test_preds"] is not None:
                     st.session_state.test_preds = best_res["_test_preds"]
-                    st.session_state.last_model_name = f"{model_name.split()[0]}_{best_res['設定'].split('（')[0]}"
+                    short_m = "Hybrid_TS_LGBM" if is_hybrid else model_name.split()[0]
+                    st.session_state.last_model_name = f"{short_m}_{best_res['設定'].split('（')[0]}"
                     st.session_state.last_task_type = task_type
 
                 st.write(f"### 📈 評価スコア (OOF: {best_res['設定']} / {cv_type.split('（')[0]})")
@@ -1679,6 +1743,36 @@ with tab5:
                     m3.metric("F1 Score", f"{best_res['F1']:.5f}")
                     m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
 
+                # --- 目的変数に対する時系列グラフ（実測値 vs 予測値） ---
+                st.write(f"### 📉 目的変数「{target_col}」の時系列推移（実測値 vs 予測値）")
+                best_oof = best_res["_oof"]
+                valid_mask = ~np.isnan(best_oof)
+
+                ts_plot_df = pd.DataFrame({
+                    "実測値": y[valid_mask].values,
+                    "予測値": best_oof[valid_mask]
+                })
+                if time_axis_col != "行順（インデックス）":
+                    ts_plot_df[time_axis_col] = work_df.loc[valid_mask, time_axis_col].values
+                    ts_plot_df = ts_plot_df.sort_values(time_axis_col)
+                    x_axis_name = time_axis_col
+                else:
+                    ts_plot_df["行番号"] = np.arange(len(ts_plot_df))
+                    x_axis_name = "行番号"
+
+                # 描画が重くなりすぎないよう5,000件超は間引き表示
+                if len(ts_plot_df) > 5000:
+                    step = max(1, len(ts_plot_df) // 5000)
+                    ts_plot_df = ts_plot_df.iloc[::step]
+                    st.caption("※描画軽量化のため約5,000点に間引いて表示しています")
+
+                fig_ts = go.Figure()
+                fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["実測値"], mode="lines", name="実測値", line=dict(color="#1f77b4", width=1.5)))
+                fig_ts.add_trace(go.Scatter(x=ts_plot_df[x_axis_name], y=ts_plot_df["予測値"], mode="lines", name="予測値", line=dict(color="#ff7f0e", width=1.5, dash="dot")))
+                fig_ts.update_layout(title=f"{x_axis_name} ごとの {target_col}（実測 vs 予測）", xaxis_title=x_axis_name, yaxis_title=target_col, hovermode="x unified")
+                st.plotly_chart(fig_ts, use_container_width=True)
+
+                # --- 特徴量重要度 ---
                 imp_title = f"特徴量重要度 Top 20 ({best_res['設定']})" if model_name != "線形モデル (Ridge / Logistic)" else f"回帰係数の絶対値 Top 20 ({best_res['設定']})"
                 imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": best_res["_imp"]}).sort_values("重要度", ascending=True).tail(20)
                 fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title=imp_title)
