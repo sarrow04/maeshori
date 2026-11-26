@@ -458,7 +458,6 @@ with tab1:
         if mode == "通常分析モード":
             uploaded_files = st.file_uploader(
                 "分析用データをアップロード（複数ファイル同時選択可）",
-                type=["csv", "parquet", "zip"],
                 accept_multiple_files=True,
                 key="normal_multi_uploader"
             )
@@ -496,7 +495,7 @@ with tab1:
         else:
             col1, col2, col3 = st.columns(3)
             with col1:
-                train_file = st.file_uploader("学習用データ (train)", type=["csv", "parquet", "zip"])
+                train_file = st.file_uploader("学習用データ (train)")
                 if train_file:
                     try:
                         df, start_m, end_m = load_file(train_file)
@@ -509,7 +508,7 @@ with tab1:
                         st.error(f"Train読み込みエラー: {e}")
 
             with col2:
-                test_file = st.file_uploader("評価用データ (test)", type=["csv", "parquet", "zip"])
+                test_file = st.file_uploader("評価用データ (test)")
                 if test_file:
                     try:
                         t_df, t_start, t_end = load_file(test_file)
@@ -523,7 +522,7 @@ with tab1:
 
             with col3:
                 sub_has_header = st.checkbox("Submitにヘッダー（列名）あり", value=True, help="SIGNATEなどヘッダーなしの提出ファイルはオフにしてください")
-                sub_file = st.file_uploader("提出用テンプレート (sample_submit)", type=["csv", "parquet", "zip"])
+                sub_file = st.file_uploader("提出用テンプレート (sample_submit)")
                 if sub_file:
                     try:
                         s_df = load_sub_file(sub_file, sub_has_header)
@@ -619,7 +618,6 @@ with tab1:
                 top_vals.append(", ".join([f"{k}({v:,})" for k, v in vc.items()]))
                 col_cats.append(classify_column(df_show[c]))
 
-            # 自動分類の件数サマリー
             cat_counts = pd.Series(col_cats).value_counts()
             st.caption("カラム分類内訳: " + " | ".join([f"**{k}**: {v}列" for k, v in cat_counts.items()]))
 
@@ -647,7 +645,7 @@ with tab1:
     elif t1_mode == "2. データ管理（追加・削除・保存）":
         st.subheader("➕ 追加データの登録（結合用・サブデータなど）")
         c1, c2 = st.columns([2, 1])
-        extra_file = c1.file_uploader("追加で読み込むファイル (CSV / Parquet / ZIP)", type=["csv", "parquet", "zip"], key="extra_uploader")
+        extra_file = c1.file_uploader("追加で読み込むファイル (CSV / Parquet / ZIP)", key="extra_uploader")
         default_extra_name = os.path.splitext(extra_file.name)[0] if extra_file else "sub_data"
         extra_name = c2.text_input("登録するデータ名", value=default_extra_name, key="extra_name_input")
 
@@ -1625,7 +1623,7 @@ with tab4:
                         notify_and_refresh(f"メッシュコード列「{new_m_col}」を生成しました！")
 
             elif mesh_mode.startswith("C."):
-                ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet / ZIP)", type=["csv", "parquet", "zip"], key="ext_mesh_file")
+                ext_file = st.file_uploader("外部メッシュデータ (CSV / Parquet / ZIP)", key="ext_mesh_file")
                 if ext_file:
                     ext_df, _, _ = load_file(ext_file)
                     st.caption(f"外部データ: {ext_df.shape[0]:,}行 × {ext_df.shape[1]}列")
@@ -1960,7 +1958,6 @@ with tab5:
                         f1_mac = f1_score(y_eval, pred_cls, average="macro", zero_division=0)
                         f1_w = f1_score(y_eval, pred_cls, average="weighted", zero_division=0)
                         ll = log_loss(y_eval, np.clip(p_eval, 1e-15, 1 - 1e-15), labels=list(range(n_classes)))
-                        # テスト予測は元のクラスラベルへ戻す
                         final_test_preds = np.array([class_labels[i] for i in np.argmax(test_preds_proba, axis=1)]) if test_preds_proba is not None else None
                         results.append({
                             "設定": preset, "Accuracy": acc, "Macro F1": f1_mac, "Weighted F1": f1_w, "LogLoss": ll,
@@ -1996,7 +1993,6 @@ with tab5:
                     m3.metric("R²（1に近いほど良い）", f"{best_res['R2']:.5f}")
                     m4.metric("RMSLE（低いほど良い）", f"{best_res['RMSLE']:.5f}" if not np.isnan(best_res["RMSLE"]) else "算出不可")
 
-                    # 回帰：時系列推移グラフ（実測値 vs 予測値）
                     st.write(f"### 📉 目的変数「{target_col}」の時系列推移（実測値 vs 予測値）")
                     best_oof = best_res["_oof"]
                     valid_mask = ~np.isnan(best_oof)
@@ -2034,7 +2030,6 @@ with tab5:
                         m3.metric("Weighted F1", f"{best_res['Weighted F1']:.5f}")
                         m4.metric("LogLoss（低いほど良い）", f"{best_res['LogLoss']:.5f}")
 
-                    # 分類：混同行列ヒートマップ
                     st.write("### 🧮 混同行列 (Confusion Matrix)")
                     cm = confusion_matrix(y[best_res["_valid_mask"]], best_res["_oof_cls"], labels=list(range(n_classes)))
                     lbl_strs = [str(l) for l in class_labels]
@@ -2049,7 +2044,6 @@ with tab5:
                     )
                     st.plotly_chart(fig_cm, use_container_width=True)
 
-                # --- 特徴量重要度 ---
                 imp_title = f"特徴量重要度 Top 20 ({best_res['設定']})" if model_name != "線形モデル (Ridge / Logistic)" else f"回帰係数の絶対値 Top 20 ({best_res['設定']})"
                 imp_df = pd.DataFrame({"特徴量": feature_cols, "重要度": best_res["_imp"]}).sort_values("重要度", ascending=True).tail(20)
                 fig_imp = px.bar(imp_df, x="重要度", y="特徴量", orientation="h", title=imp_title)
