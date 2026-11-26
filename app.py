@@ -391,12 +391,17 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
 ])
 
 # ==========================================
-# TAB 1: データ読み込み・管理・結合
+# TAB 1: データ読み込み・管理・結合・分割
 # ==========================================
 with tab1:
     t1_mode = st.radio(
         "メニュー",
-        ["1. 読み込み・概要", "2. データ管理（追加・削除・保存）", "3. データ結合（横結合・縦結合）"],
+        [
+            "1. 読み込み・概要",
+            "2. データ管理（追加・削除・保存）",
+            "3. データ結合（横結合・縦結合）",
+            "4. データ分割（Train / Test分離）"
+        ],
         horizontal=True
     )
 
@@ -738,6 +743,91 @@ with tab1:
                                 notify_and_refresh(f"縦結合データ「{concat_new_name}」を新規登録しました！（{concated.shape[0]:,}行 × {concated.shape[1]}列）")
                         except Exception as e:
                             st.error(f"結合エラー: {e}")
+
+    # --- 4. データ分割（Train / Test分離） ---
+    elif t1_mode == "4. データ分割（Train / Test分離）":
+        st.subheader("✂️ 1つのデータを Train / Test に分割")
+        datasets = get_all_datasets()
+        if not datasets:
+            st.info("先に「1. 読み込み・概要」からデータを読み込んでください。")
+        else:
+            sc1, sc2 = st.columns(2)
+            src_name = sc1.selectbox("分割する元データを選択", list(datasets.keys()), key="split_src_name")
+            split_method = sc2.selectbox(
+                "分割の条件",
+                [
+                    "A. 目的変数の有無で分割（値あり=train / 欠損NaN=test）",
+                    "B. カラムの文字で分割（例: train / test の文字）"
+                ],
+                key="split_method"
+            )
+
+            src_df = datasets[src_name]
+            src_cols = src_df.columns.tolist()
+
+            if split_method.startswith("A."):
+                y_col = st.selectbox("目的変数（yなど）の列を選択", src_cols, index=len(src_cols) - 1, key="split_y_col")
+                drop_y_from_test = st.checkbox("分割後、Test側からこの目的変数列を削除する（推奨）", value=True, key="split_drop_y")
+
+                tr_mask = src_df[y_col].notnull()
+                te_mask = src_df[y_col].isnull()
+                tr_cnt, te_cnt = int(tr_mask.sum()), int(te_mask.sum())
+
+                m1, m2 = st.columns(2)
+                m1.metric("Trainになる行数（値あり）", f"{tr_cnt:,}行")
+                m2.metric("Testになる行数（欠損NaN）", f"{te_cnt:,}行")
+
+                if st.button("✂️ Train / Test に分割して反映する", key="exec_split_a"):
+                    if tr_cnt == 0 or te_cnt == 0:
+                        st.error("TrainまたはTestの行数が0件のため分割できません。列を確認してください。")
+                    else:
+                        new_tr = src_df[tr_mask].reset_index(drop=True)
+                        new_te = src_df[te_mask].reset_index(drop=True)
+                        if drop_y_from_test and y_col in new_te.columns:
+                            new_te = new_te.drop(columns=[y_col])
+                        st.session_state.train_df = new_tr
+                        st.session_state.train_name = "train"
+                        st.session_state.test_df = new_te
+                        st.session_state.test_raw_df = new_te.copy()
+                        notify_and_refresh(f"「{src_name}」を分割しました！ Train: {len(new_tr):,}行 / Test: {len(new_te):,}行")
+
+            else:
+                bc1, bc2, bc3 = st.columns(3)
+                flag_col = bc1.selectbox("判定に使うカラム", src_cols, key="split_flag_col")
+                tr_kw = bc2.text_input("Trainとみなす文字", value="train", key="split_tr_kw")
+                te_kw = bc3.text_input("Testとみなす文字", value="test", key="split_te_kw")
+
+                bc4, bc5 = st.columns(2)
+                match_type = bc4.radio("一致条件", ["部分一致（含む）", "完全一致"], horizontal=True, key="split_match_type")
+                drop_flag_col = bc5.checkbox("分割後、この判定用カラムを削除する", value=True, key="split_drop_flag")
+
+                s_str = src_df[flag_col].astype(str)
+                if match_type == "部分一致（含む）":
+                    tr_mask = s_str.str.contains(tr_kw, case=False, na=False, regex=False) if tr_kw else pd.Series(False, index=src_df.index)
+                    te_mask = s_str.str.contains(te_kw, case=False, na=False, regex=False) if te_kw else pd.Series(False, index=src_df.index)
+                else:
+                    tr_mask = s_str.str.lower() == tr_kw.lower()
+                    te_mask = s_str.str.lower() == te_kw.lower()
+
+                tr_cnt, te_cnt = int(tr_mask.sum()), int(te_mask.sum())
+                m1, m2 = st.columns(2)
+                m1.metric(f"Trainになる行数（{tr_kw}）", f"{tr_cnt:,}行")
+                m2.metric(f"Testになる行数（{te_kw}）", f"{te_cnt:,}行")
+
+                if st.button("✂️ Train / Test に分割して反映する", key="exec_split_b"):
+                    if tr_cnt == 0 or te_cnt == 0:
+                        st.error("TrainまたはTestの行数が0件のため分割できません。カラムや文字を確認してください。")
+                    else:
+                        new_tr = src_df[tr_mask].reset_index(drop=True)
+                        new_te = src_df[te_mask].reset_index(drop=True)
+                        if drop_flag_col:
+                            new_tr = new_tr.drop(columns=[flag_col], errors="ignore")
+                            new_te = new_te.drop(columns=[flag_col], errors="ignore")
+                        st.session_state.train_df = new_tr
+                        st.session_state.train_name = "train"
+                        st.session_state.test_df = new_te
+                        st.session_state.test_raw_df = new_te.copy()
+                        notify_and_refresh(f"「{src_name}」を分割しました！ Train: {len(new_tr):,}行 / Test: {len(new_te):,}行")
 
 # ==========================================
 # TAB 2: グラフ可視化 (Plotly)
@@ -1518,7 +1608,6 @@ with tab5:
             use_log1p = False
             c6.write("")
 
-        # 時系列グラフ・時系列CV用の時間軸列
         tc1, tc2 = st.columns(2)
         time_axis_col = tc1.selectbox(
             "時系列グラフ用の時間軸列（日付・時刻など）",
@@ -1565,7 +1654,6 @@ with tab5:
 
                 is_hybrid = (model_name == "時系列トレンド + LightGBM（ハイブリッド）")
 
-                # モデル別の前処理
                 if model_name == "LightGBM" or is_hybrid:
                     for col in X.select_dtypes(include=["object", "string"]).columns:
                         X[col] = X[col].astype("category")
@@ -1629,13 +1717,11 @@ with tab5:
                         y_va_fit = np.log1p(y_va) if use_log1p else y_va
 
                         if is_hybrid:
-                            # 1段階目：線形モデルで全体トレンドを学習
                             trend_model = make_pipeline(StandardScaler(), Ridge(alpha=1.0))
                             trend_model.fit(X_num.iloc[tr_idx], y_tr_fit)
                             tr_trend = trend_model.predict(X_num.iloc[tr_idx])
                             va_trend = trend_model.predict(X_num.iloc[va_idx])
 
-                            # 2段階目：残差（実測 - トレンド）をLightGBMで学習
                             lgb_model = build_model("LightGBM", "回帰", preset, 42 + fold)
                             lgb_model.fit(
                                 X_tr, y_tr_fit - tr_trend,
@@ -1760,7 +1846,6 @@ with tab5:
                     ts_plot_df["行番号"] = np.arange(len(ts_plot_df))
                     x_axis_name = "行番号"
 
-                # 描画が重くなりすぎないよう5,000件超は間引き表示
                 if len(ts_plot_df) > 5000:
                     step = max(1, len(ts_plot_df) // 5000)
                     ts_plot_df = ts_plot_df.iloc[::step]
